@@ -88,7 +88,61 @@ class MobileGameController extends Controller
             return response()->json($error, 401);
         }
 
-        return response()->json($loginService->getCharacterData($id, $sessionKey));
+        $data = $loginService->getCharacterData($id, $sessionKey);
+        if (is_array($data)) {
+            $char = Character::find($id);
+            if ($char) {
+                $nextXp = (int) (\App\Models\XP::where('level', $char->level)->value('character_xp') ?: ($char->level * 100));
+                $prevXp = $char->level > 1
+                    ? (int) (\App\Models\XP::where('level', $char->level - 1)->value('character_xp') ?: 0)
+                    : 0;
+                $data['next_level_xp'] = $nextXp;
+                $data['prev_level_xp'] = $prevXp;
+            }
+            $user = $char ? \App\Models\User::find($char->user_id) : null;
+            if ($user) {
+                $tokens = (int) $user->tokens;
+                $accType = (int) ($user->account_type ?? 0);
+                $data['account_tokens'] = $tokens;
+                $data['account_type'] = $accType;
+                if (isset($data['account_data']) && is_array($data['account_data'])) {
+                    $data['account_data']['account_tokens'] = $tokens;
+                    $data['account_data']['account_type'] = $accType;
+                } else {
+                    $data['account_data'] = ['account_tokens' => $tokens, 'account_type' => $accType];
+                }
+            }
+        }
+
+        return response()->json($data);
+    }
+
+    public function characterDelete(Request $request, int $id): JsonResponse
+    {
+        $uid = (int) ($request->header('X-User-Id') ?? $request->input('uid'));
+        $sessionKey = (string) ($request->header('X-Session-Key') ?? $request->input('session_key'));
+
+        if ($error = SessionValidator::validateUser($uid, $sessionKey)) {
+            return response()->json($error, 401);
+        }
+
+        $char = Character::where('id', $id)->where('user_id', $uid)->first();
+        if (!$char) {
+            return response()->json(['status' => 0, 'error' => 'Character not found.'], 404);
+        }
+
+        $charName = $char->name;
+        \Illuminate\Support\Facades\DB::transaction(function () use ($char) {
+            // Delete character-owned records only; account-bound users.tokens remains completely intact!
+            $char->delete();
+        });
+
+        $user = \App\Models\User::find($uid);
+        return response()->json([
+            'status' => 1,
+            'message' => "Character {$charName} deleted.",
+            'account_tokens' => (int) ($user?->tokens ?? 0),
+        ]);
     }
 
     public function characterCreate(Request $request, CharacterService $characterService): JsonResponse
@@ -304,8 +358,15 @@ class MobileGameController extends Controller
             ]);
         }
 
+        $user = \App\Models\User::find($char->user_id);
+        $isPremium = $user && ((int) ($user->account_type ?? 0) >= 1);
+
         $goldReward = (int) $cached['reward_gold'];
         $xpReward = (int) $cached['reward_xp'];
+        if ($isPremium) {
+            $goldReward = (int) round($goldReward * 1.5);
+            $xpReward = (int) round($xpReward * 1.5);
+        }
         $huntingBadges = (int) ($cached['hunting_badges'] ?? 0);
 
         $char->gold += $goldReward;
@@ -325,6 +386,7 @@ class MobileGameController extends Controller
             'victory' => true,
             'xp_reward' => $xpReward,
             'gold_reward' => $goldReward,
+            'premium_bonus' => $isPremium,
             'badges_reward' => $huntingBadges,
             'level' => (int) $char->level,
             'xp' => (int) $char->xp,

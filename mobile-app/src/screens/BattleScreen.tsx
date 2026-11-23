@@ -1,40 +1,65 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
+  Image,
   Pressable,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { MobileApiClient, type BattleFinishResponse } from '../api/client';
 import {
   loadGameData,
   loadLibraryData,
+  loadPetsJson,
   type EnemyDef,
+  type PetJsonDef,
   type RawSkillEffectDef,
   type SkillDef,
 } from '../api/gameData';
 import { playBgm, playClickSfx } from '../audio/audioManager';
-import { buildAudioUrl, buildBattleSwfUrl } from '../config/env';
+import {
+  AttackActionTile,
+  ChargeActionTile,
+  FleeActionTile,
+  ItemActionTile,
+  JutsuActionTile,
+} from '../components/BattleActionIcons';
+import { FloatingPopup } from '../components/FloatingPopup';
+import { LoadingScreenOverlay } from '../components/LoadingScreenOverlay';
+import { TimelineToken } from '../components/TimelineToken';
+import { buildAudioUrl, buildBattleSwfUrl, buildSkillIconsSwfUrl } from '../config/env';
 import {
   advanceAgilityTimeline,
+  attemptFlee,
   buildEnemyCombatant,
+  buildPetCombatant,
   buildPlayerCombatant,
+  chooseAutoBattleAction,
+  executeConsumableAction,
   executeEnemyTurn,
-  executePlayerAction,
+  executePetTurn,
+  executePlayerActionMulti,
   getEffectiveAgility,
+  getEffectiveCritChance,
   getEffectiveSkillCpCost,
+  getEffectiveUnitAccuracyChance,
+  getEffectiveUnitDodgeChance,
+  getOutgoingDamageMultiplier,
+  getSkillElementMeta,
   isChargeDisabled,
+  isSkillAoE,
   isSkillsRestricted,
   processTurnStart,
+  type BattleConsumable,
   type Combatant,
   type FloatingNumber,
   type StatusEffect,
   type TimelineParticipant,
   type TurnOutcome,
 } from '../engine/battleEngine';
-import { TimelineToken } from '../components/TimelineToken';
 import {
   RuffleStageView,
   type RuffleStageHandle,
@@ -42,8 +67,59 @@ import {
 } from '../stage/RuffleStageView';
 import { useAuthStore } from '../store/useAuthStore';
 
+const INITIAL_CONSUMABLES: BattleConsumable[] = [
+  { id: 'hp_scroll', name: 'HP Scroll', icon: '🧪', desc: 'Restore 35% Max HP', qty: 2 },
+  { id: 'cp_scroll', name: 'CP Scroll', icon: '💧', desc: 'Restore 35% Max CP', qty: 2 },
+  { id: 'purify_pill', name: 'Antidote', icon: '✨', desc: 'Clear all debuffs', qty: 2 },
+];
+
+const SWF_ARENA_W = 860;
+const SWF_ARENA_H = 440;
+const SWF_PLAYER_X = 220;
+const SWF_PLAYER_Y = 255;
+const SWF_CHAR_CENTER_Y_OFFSET = 30; // Mid-torso height above ground origin (y=0) at CHAR_SCALE=0.25
+const UNIT_PLATE_W = 106;
+const UNIT_PLATE_H = 44;
+
+const SWF_ENEMY_FORMATIONS: Record<number, Array<[number, number]>> = {
+  1: [[630, 255]],
+  2: [
+    [630, 200],
+    [630, 298],
+  ],
+  3: [
+    [630, 168],
+    [630, 244],
+    [630, 320],
+  ],
+};
+
+/**
+ * Exact mathematical inverse of Ruffle's `scale: 'noBorder'` transform.
+ * Projects any SWF stage coordinate (swfX, swfY) on 860x440 to exact screen pixels (x, y)
+ * so HP & CP bars lock pixel-perfectly to every character on ANY screen aspect ratio!
+ */
+function swfToScreen(
+  swfX: number,
+  swfY: number,
+  stageW: number,
+  stageH: number
+): { x: number; y: number; scale: number } {
+  const scale = Math.max(stageW / SWF_ARENA_W, stageH / SWF_ARENA_H);
+  const offsetX = (stageW - SWF_ARENA_W * scale) / 2;
+  const offsetY = (stageH - SWF_ARENA_H * scale) / 2;
+  return {
+    x: offsetX + swfX * scale,
+    y: offsetY + swfY * scale,
+    scale,
+  };
+}
+
 export function BattleScreen() {
   const stageRef = useRef<RuffleStageHandle>(null);
+  const shakeAnim = useRef(new Animated.Value(0)).current;
+  const winDims = useWindowDimensions();
+  const [stageSize, setStageSize] = useState({ width: winDims.width, height: winDims.height });
 
   const serverUrl = useAuthStore((s) => s.serverUrl);
   const sessionKey = useAuthStore((s) => s.sessionKey);
@@ -81,18 +157,136 @@ export function BattleScreen() {
   const [player, setPlayer] = useState<Combatant>(() =>
     buildPlayerCombatant(profile?.name ?? 'Ninja', profile?.level ?? 1, profile?.points, 0)
   );
+  const [pet, setPet] = useState<Combatant | null>(null);
+  const petDefRef = useRef<PetJsonDef | undefined>(undefined);
   const [enemies, setEnemies] = useState<Combatant[]>(initialEnemies);
   const [targetIdx, setTargetIdx] = useState(0);
   const [timelineGauges, setTimelineGauges] = useState<Record<string, number>>({});
   const [activeActorId, setActiveActorId] = useState<string | null>('player');
   const [turnCount, setTurnCount] = useState(0);
 
+  // Ninja Horizon Battle Controls
+  const [speed, setSpeed] = useState<1 | 2>(1);
+  const [autoBattle, setAutoBattle] = useState(false);
+  const [showItems, setShowItems] = useState(false);
+  const [consumables, setConsumables] = useState<BattleConsumable[]>(INITIAL_CONSUMABLES);
+  const [inspectedSkill, setInspectedSkill] = useState<SkillDef | null>(null);
+  const [inspectedUnit, setInspectedUnit] = useState<{ side: 'player' | 'enemy'; idx: number } | null>(null);
+  const [showFleeModal, setShowFleeModal] = useState(false);
+
+  const speedRef = useRef<1 | 2>(1);
+  speedRef.current = speed;
+  const autoRef = useRef(false);
+  autoRef.current = autoBattle;
   const gaugesRef = useRef<Record<string, number>>({});
   const playerRef = useRef(player);
   playerRef.current = player;
+  const petRef = useRef<Combatant | null>(pet);
+  petRef.current = pet;
   const enemiesRef = useRef(enemies);
   enemiesRef.current = enemies;
   const cooldownsRef = useRef<Record<string, number>>({});
+  const statsInitializedRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  const [skills, setSkills] = useState<SkillDef[]>([]);
+  const [skillIcons, setSkillIcons] = useState<Record<string, string>>({});
+  const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
+  cooldownsRef.current = cooldowns;
+  const skillEffectsByIdRef = useRef<Record<string, RawSkillEffectDef[]>>({});
+  const enemiesByIdRef = useRef<Record<string, EnemyDef>>({});
+  const [stageReady, setStageReady] = useState(false);
+  const [turn, setTurn] = useState<'player' | 'animating' | 'done'>('animating');
+  const [combatLog, setCombatLog] = useState<string>('Loading Ninja Horizon 36 FPS Battle Stage...');
+  const [floats, setFloats] = useState<FloatingNumber[]>([]);
+  const [finishResult, setFinishResult] = useState<BattleFinishResponse | null>(null);
+  const [finishing, setFinishing] = useState(false);
+
+  // Refs for SWF ExternalInterface (__onHit / __onDone) + anti-soft-lock watchdogs
+  const pendingHitRef = useRef<(() => void) | null>(null);
+  const pendingDoneRef = useRef<(() => void) | null>(null);
+  const hitWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const doneWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (hitWatchdogRef.current) clearTimeout(hitWatchdogRef.current);
+      if (doneWatchdogRef.current) clearTimeout(doneWatchdogRef.current);
+    };
+  }, []);
+
+  const clearWatchdogs = useCallback(() => {
+    if (hitWatchdogRef.current) {
+      clearTimeout(hitWatchdogRef.current);
+      hitWatchdogRef.current = null;
+    }
+    if (doneWatchdogRef.current) {
+      clearTimeout(doneWatchdogRef.current);
+      doneWatchdogRef.current = null;
+    }
+  }, []);
+
+  const armSequenceCallbacks = useCallback(
+    (onHit: (() => void) | null, onDone: (() => void) | null) => {
+      clearWatchdogs();
+      let hitFired = false;
+      let doneFired = false;
+
+      const fireHit = () => {
+        if (hitFired || !mountedRef.current) return;
+        hitFired = true;
+        pendingHitRef.current = null;
+        if (hitWatchdogRef.current) {
+          clearTimeout(hitWatchdogRef.current);
+          hitWatchdogRef.current = null;
+        }
+        onHit?.();
+      };
+
+      const fireDone = () => {
+        if (doneFired || !mountedRef.current) return;
+        if (!hitFired && onHit) fireHit();
+        doneFired = true;
+        pendingDoneRef.current = null;
+        clearWatchdogs();
+        onDone?.();
+      };
+
+      pendingHitRef.current = onHit ? fireHit : null;
+      pendingDoneRef.current = onDone ? fireDone : null;
+
+      const sp = speedRef.current;
+      if (onHit) {
+        hitWatchdogRef.current = setTimeout(fireHit, Math.round(2400 / sp));
+      }
+      if (onDone) {
+        doneWatchdogRef.current = setTimeout(fireDone, Math.round(4300 / sp));
+      }
+    },
+    [clearWatchdogs]
+  );
+
+  const triggerCritShake = useCallback(() => {
+    shakeAnim.setValue(0);
+    Animated.sequence([
+      Animated.timing(shakeAnim, { toValue: -7, duration: 38, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: 7, duration: 38, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: -5, duration: 35, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: 5, duration: 35, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: 0, duration: 35, useNativeDriver: true }),
+    ]).start();
+  }, [shakeAnim]);
+
+  const pushFloats = useCallback((items: FloatingNumber[]) => {
+    if (items.length === 0) return;
+    setFloats((prev) => [...prev.slice(-10), ...items]);
+  }, []);
+
+  const removeFloat = useCallback((id: number) => {
+    setFloats((prev) => prev.filter((f) => f.id !== id));
+  }, []);
 
   useEffect(() => {
     setEnemies(initialEnemies);
@@ -100,30 +294,13 @@ export function BattleScreen() {
     setTargetIdx(firstAlive !== -1 ? firstAlive : 0);
 
     const initGauges: Record<string, number> = { player: 0 };
+    if (petRef.current) initGauges['pet'] = 0;
     initialEnemies.forEach((_, idx) => {
       initGauges[`ene_${idx}`] = 0;
     });
     setTimelineGauges(initGauges);
     gaugesRef.current = initGauges;
   }, [initialEnemies]);
-
-  const [skills, setSkills] = useState<SkillDef[]>([]);
-  const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
-  cooldownsRef.current = cooldowns;
-  const skillEffectsByIdRef = useRef<Record<string, RawSkillEffectDef[]>>({});
-  const enemiesByIdRef = useRef<Record<string, EnemyDef>>({});
-  const [stageReady, setStageReady] = useState(false);
-  const [turn, setTurn] = useState<'player' | 'animating' | 'done'>('player');
-  const [combatLog, setCombatLog] = useState<string>(
-    `Loading 36 FPS Unified Battle Stage...`
-  );
-  const [floats, setFloats] = useState<FloatingNumber[]>([]);
-  const [finishResult, setFinishResult] = useState<BattleFinishResponse | null>(null);
-  const [finishing, setFinishing] = useState(false);
-
-  // Refs for exact SWF ExternalInterface (__onHit / __onDone) synchronization
-  const pendingHitRef = useRef<(() => void) | null>(null);
-  const pendingDoneRef = useRef<(() => void) | null>(null);
 
   const charId = profile?.charId ?? 1;
   const equipTag = profile
@@ -134,11 +311,17 @@ export function BattleScreen() {
     () => initialEnemies.map((e) => e.id).join(','),
     [initialEnemies]
   );
+  const missionBg = activeBattle?.mission.bg ?? 'mission_01';
 
-  // Load equipped skills metadata + equipped weapon damage bonus
+  // Load skills, weapon damage, and equipped pet metadata ONCE per battle
   useEffect(() => {
-    Promise.all([loadGameData(serverUrl), loadLibraryData(serverUrl)])
-      .then(([bundle, lib]) => {
+    Promise.all([
+      loadGameData(serverUrl),
+      loadLibraryData(serverUrl),
+      loadPetsJson(serverUrl).catch(() => ({} as Record<string, PetJsonDef>)),
+    ])
+      .then(([bundle, lib, petsById]) => {
+        if (!mountedRef.current) return;
         const ids = equippedSkillsKey.split(',').filter(Boolean);
         const resolved = ids
           .map((id) => bundle.skillsById[id])
@@ -147,21 +330,30 @@ export function BattleScreen() {
         skillEffectsByIdRef.current = bundle.skillEffectsById ?? {};
         enemiesByIdRef.current = bundle.enemiesById ?? {};
 
-        const wpnDmg = profile?.weapon ? (lib.itemsById[profile.weapon]?.damage ?? 0) : 0;
-        if (profile) {
+        if (!statsInitializedRef.current && profile) {
+          statsInitializedRef.current = true;
+          const wpnDmg = profile.weapon ? (lib.itemsById[profile.weapon]?.damage ?? 0) : 0;
           const boosted = buildPlayerCombatant(profile.name, profile.level, profile.points, wpnDmg);
-          setPlayer((prev) => ({
-            ...prev,
-            maxHp: boosted.maxHp,
-            hp: boosted.maxHp,
-            maxCp: boosted.maxCp,
-            cp: boosted.maxCp,
-            baseDamage: boosted.baseDamage,
-            weaponDamage: wpnDmg,
-            points: profile.points,
-            critChance: boosted.critChance,
-            dodgeChance: boosted.dodgeChance,
-          }));
+          setPlayer(boosted);
+
+          if (profile.equippedPet) {
+            const rawPet = (profile.raw?.pet_data ?? {}) as Record<string, unknown>;
+            const petSwfId = String(rawPet.pet_swf ?? rawPet.swf ?? `pet_${profile.equippedPet}`);
+            const matchedPet =
+              petsById[petSwfId] ??
+              Object.values(petsById).find((p) => p.id === petSwfId) ??
+              Object.values(petsById)[0];
+            if (matchedPet) {
+              petDefRef.current = matchedPet;
+              const petComb = buildPetCombatant(
+                { ...matchedPet, level: Number(rawPet.pet_level ?? profile.level) || profile.level },
+                profile.level
+              );
+              setPet(petComb);
+              gaugesRef.current['pet'] = 0;
+              setTimelineGauges({ ...gaugesRef.current });
+            }
+          }
         }
       })
       .catch(() => {});
@@ -175,7 +367,7 @@ export function BattleScreen() {
     };
   }, [serverUrl]);
 
-  // Load ONE Unified 36 FPS Battle SWF containing Player + ALL 1..3 Enemies + Skills!
+  // Load ONE Unified 36 FPS Battle SWF (Mission BG + Player + 1..3 Enemies + Dressed Skills!)
   useEffect(() => {
     setStageReady(false);
     const timer = setTimeout(() => {
@@ -184,350 +376,536 @@ export function BattleScreen() {
         charId,
         enemiesCsv,
         equippedSkillsKey,
-        equipTag
+        equipTag,
+        missionBg
       );
       stageRef.current?.loadSwf(battleSwfUrl);
-    }, 350);
+    }, 300);
     return () => clearTimeout(timer);
-  }, [serverUrl, charId, enemiesCsv, equippedSkillsKey, equipTag]);
+  }, [serverUrl, charId, enemiesCsv, equippedSkillsKey, equipTag, missionBg]);
 
-  const showFloats = (items: FloatingNumber[]) => {
-    if (items.length === 0) return;
-    setFloats(items);
-    setTimeout(() => setFloats([]), 900);
+  const toggleSpeed = () => {
+    playClickSfx(serverUrl);
+    const next: 1 | 2 = speed === 1 ? 2 : 1;
+    setSpeed(next);
+    speedRef.current = next;
+    stageRef.current?.setSpeed(next);
   };
 
-  const concludeBattle = async (victory: boolean) => {
-    setTurn('done');
-    if (!profile || !sessionKey || !activeBattle) return;
-    setFinishing(true);
-    try {
-      const res = await api.battleFinish(
-        profile.charId,
-        sessionKey,
-        activeBattle.mission.id,
-        activeBattle.token,
-        victory
-      );
-      setFinishResult(res);
-      patchProfileStats({ level: res.level, xp: res.xp, gold: res.gold });
-      if (res.level_up) {
-        api
-          .getCharacter(profile.charId, sessionKey)
-          .then((raw) => useAuthStore.getState().setProfileFromRaw(profile.charId, raw))
-          .catch(() => {});
+  const toggleAuto = () => {
+    playClickSfx(serverUrl);
+    setAutoBattle((prev) => !prev);
+  };
+
+  const concludeBattle = useCallback(
+    async (victory: boolean) => {
+      clearWatchdogs();
+      setTurn('done');
+      setAutoBattle(false);
+      if (!profile || !sessionKey || !activeBattle) return;
+      setFinishing(true);
+      try {
+        const res = await api.battleFinish(
+          profile.charId,
+          sessionKey,
+          activeBattle.mission.id,
+          activeBattle.token,
+          victory
+        );
+        if (!mountedRef.current) return;
+        setFinishResult(res);
+        patchProfileStats({ level: res.level, xp: res.xp, gold: res.gold });
+        if (res.level_up) {
+          api
+            .getCharacter(profile.charId, sessionKey)
+            .then((raw) => useAuthStore.getState().setProfileFromRaw(profile.charId, raw))
+            .catch(() => {});
+        }
+      } catch (err) {
+        if (mountedRef.current) setCombatLog(`Finish error: ${String(err)}`);
+      } finally {
+        if (mountedRef.current) setFinishing(false);
       }
-    } catch (err) {
-      setCombatLog(`Finish error: ${String(err)}`);
-    } finally {
-      setFinishing(false);
-    }
-  };
+    },
+    [activeBattle, api, clearWatchdogs, patchProfileStats, profile, sessionKey]
+  );
 
-  const handleStageEvent = (ev: StageEvent) => {
-    if (ev.type === 'STAGE_READY') {
-      setStageReady(true);
-      setCombatLog(
-        `Battle started: ${activeBattle?.mission.name ?? 'Mission'} (${initialEnemies.length} enemy)!`
-      );
-      // Start the Agility Timeline!
-      setTimeout(() => {
-        stepTimeline(playerRef.current, enemiesRef.current, cooldownsRef.current);
-      }, 250);
-      return;
-    }
-    if (ev.type === 'ANIM_HIT') {
-      const fn = pendingHitRef.current;
-      pendingHitRef.current = null;
-      fn?.();
-      return;
-    }
-    if (ev.type === 'ANIM_DONE') {
-      const fn = pendingDoneRef.current;
-      pendingDoneRef.current = null;
-      fn?.();
-      return;
-    }
-  };
-
-  // Agility Timeline Step: advances timeline gauges and determines the next actor based on Effective Agility!
-  const stepTimeline = (
-    curPlayer: Combatant,
-    curEnemies: Combatant[],
-    curCd: Record<string, number>
-  ) => {
-    if (curPlayer.hp <= 0 || curEnemies.every((e) => e.hp <= 0)) {
-      return;
-    }
-
-    const participants: TimelineParticipant[] = [
-      {
-        id: 'player',
-        name: curPlayer.name,
-        agility: getEffectiveAgility(curPlayer),
-        isPlayer: true,
-        isAlive: curPlayer.hp > 0,
-      },
-      ...curEnemies.map((e, idx) => ({
-        id: `ene_${idx}`,
-        name: e.name,
-        agility: getEffectiveAgility(e),
-        isPlayer: false,
-        isAlive: e.hp > 0,
-      })),
-    ];
-
-    const { actorId, nextGauges } = advanceAgilityTimeline(participants, gaugesRef.current);
-    gaugesRef.current = nextGauges;
-    setTimelineGauges({ ...nextGauges });
-    setActiveActorId(actorId);
-    setTurnCount((c) => c + 1);
-
-    if (actorId === 'player') {
-      // Tick start-of-turn Buffs/Debuffs (Water Purify, Burn, Poison, Regen, Stun, Chaos, etc.)
-      const startRes = processTurnStart(curPlayer, 'player');
-      setPlayer(startRes.combatant);
-      if (startRes.floats.length > 0) {
-        showFloats(startRes.floats);
-      }
-
-      if (startRes.diedFromDot) {
-        setCombatLog(startRes.log ?? `${curPlayer.name} fell to status effects!`);
+  // Agility Timeline Step: advances ATB gauges and determines the next actor (Player, Pet, or Enemy)
+  const stepTimeline = useCallback(
+    (curPlayer: Combatant, curEnemies: Combatant[], curCd: Record<string, number>) => {
+      if (!mountedRef.current) return;
+      if (curPlayer.hp <= 0) {
         concludeBattle(false);
         return;
       }
+      if (curEnemies.every((e) => e.hp <= 0)) {
+        armSequenceCallbacks(null, () => concludeBattle(true));
+        stageRef.current?.playSequence('player_win');
+        return;
+      }
 
-      if (startRes.skipTurn) {
+      const participants: TimelineParticipant[] = [
+        {
+          id: 'player',
+          name: curPlayer.name,
+          agility: getEffectiveAgility(curPlayer),
+          isPlayer: true,
+          isAlive: curPlayer.hp > 0,
+        },
+        ...(petRef.current
+          ? [
+              {
+                id: 'pet',
+                name: petRef.current.name,
+                agility: getEffectiveAgility(petRef.current),
+                isPlayer: true,
+                isAlive: true,
+              },
+            ]
+          : []),
+        ...curEnemies.map((e, idx) => ({
+          id: `ene_${idx}`,
+          name: e.name,
+          agility: getEffectiveAgility(e),
+          isPlayer: false,
+          isAlive: e.hp > 0,
+        })),
+      ];
+
+      const { actorId, nextGauges } = advanceAgilityTimeline(participants, gaugesRef.current);
+      gaugesRef.current = nextGauges;
+      setTimelineGauges({ ...nextGauges });
+      setActiveActorId(actorId);
+      setTurnCount((c) => c + 1);
+
+      const delayScale = speedRef.current === 2 ? 0.52 : 1.0;
+
+      // ── PLAYER TURN ──
+      if (actorId === 'player') {
+        const startRes = processTurnStart(curPlayer, 'player');
+        setPlayer(startRes.combatant);
+        if (startRes.floats.length > 0) pushFloats(startRes.floats);
+
+        if (startRes.diedFromDot) {
+          setCombatLog(startRes.log ?? `${curPlayer.name} fell to status effects!`);
+          concludeBattle(false);
+          return;
+        }
+
+        if (startRes.skipTurn) {
+          setTurn('animating');
+          setCombatLog(startRes.log ?? `${curPlayer.name} cannot act (${startRes.skipReason})!`);
+          setTimeout(() => {
+            if (!mountedRef.current) return;
+            gaugesRef.current['player'] = 0;
+            setTimelineGauges({ ...gaugesRef.current });
+            setActiveActorId(null);
+            stepTimeline(startRes.combatant, enemiesRef.current, curCd);
+          }, Math.round(740 * delayScale));
+          return;
+        }
+
+        const firstAlive = curEnemies.findIndex((e) => e.hp > 0);
+        if (firstAlive !== -1) {
+          setTargetIdx((prev) => (curEnemies[prev]?.hp > 0 ? prev : firstAlive));
+        }
+        setTurn('player');
+        setCombatLog(
+          startRes.log
+            ? `${startRes.log} Your turn!`
+            : `Your turn! (AGI ${getEffectiveAgility(startRes.combatant)})`
+        );
+        return;
+      }
+
+      // ── PET TURN ──
+      if (actorId === 'pet' && petRef.current) {
         setTurn('animating');
-        setCombatLog(startRes.log ?? `${curPlayer.name} cannot act (${startRes.skipReason})!`);
+        const activePet = petRef.current;
+        const aliveTargetIdx = curEnemies.findIndex((e) => e.hp > 0);
+        if (aliveTargetIdx === -1) {
+          armSequenceCallbacks(null, () => concludeBattle(true));
+          stageRef.current?.playSequence('player_win');
+          return;
+        }
+        setCombatLog(`🐾 ${activePet.name}'s turn!`);
         setTimeout(() => {
-          gaugesRef.current['player'] = 0;
+          if (!mountedRef.current) return;
+          gaugesRef.current['pet'] = 0;
           setTimelineGauges({ ...gaugesRef.current });
           setActiveActorId(null);
-          stepTimeline(startRes.combatant, enemiesRef.current, curCd);
-        }, 780);
+
+          const latestEnemies = enemiesRef.current;
+          const tIdx =
+            latestEnemies[aliveTargetIdx]?.hp > 0
+              ? aliveTargetIdx
+              : latestEnemies.findIndex((e) => e.hp > 0);
+          if (tIdx === -1) return;
+
+          const petOut = executePetTurn(activePet, latestEnemies[tIdx], tIdx, petDefRef.current);
+          setPet(petOut.pet);
+          const nextEnemies = latestEnemies.map((e, i) => (i === tIdx ? petOut.enemy : e));
+          setEnemies(nextEnemies);
+          setCombatLog(petOut.log);
+          pushFloats(petOut.floats);
+          if (petOut.didCrit) triggerCritShake();
+
+          const allDeadAfterPet = nextEnemies.every((e) => e.hp <= 0);
+          setTimeout(() => {
+            if (!mountedRef.current) return;
+            if (allDeadAfterPet) {
+              armSequenceCallbacks(null, () => concludeBattle(true));
+              stageRef.current?.playSequence('player_win');
+            } else {
+              stepTimeline(playerRef.current, nextEnemies, curCd);
+            }
+          }, Math.round(520 * delayScale));
+        }, Math.round(480 * delayScale));
         return;
       }
 
-      const firstAlive = curEnemies.findIndex((e) => e.hp > 0);
-      if (firstAlive !== -1) {
-        setTargetIdx((prev) => (curEnemies[prev]?.hp > 0 ? prev : firstAlive));
-      }
-      setTurn('player');
-      setCombatLog(
-        startRes.log
-          ? `${startRes.log} Your turn!`
-          : `Your turn! (Agility: ${getEffectiveAgility(startRes.combatant)})`
-      );
-    } else if (actorId.startsWith('ene_')) {
-      const enemyIdx = parseInt(actorId.replace('ene_', ''), 10);
-      const enemy = curEnemies[enemyIdx];
-      if (!enemy || enemy.hp <= 0) {
-        gaugesRef.current[actorId] = 0;
-        stepTimeline(curPlayer, curEnemies, curCd);
-        return;
-      }
+      // ── ENEMY TURN ──
+      if (actorId.startsWith('ene_')) {
+        const enemyIdx = parseInt(actorId.replace('ene_', ''), 10);
+        const enemy = curEnemies[enemyIdx];
+        if (!enemy || enemy.hp <= 0) {
+          gaugesRef.current[actorId] = 0;
+          stepTimeline(curPlayer, curEnemies, curCd);
+          return;
+        }
 
-      setTurn('animating');
+        setTurn('animating');
+        const startRes = processTurnStart(enemy, 'enemy');
+        const enemiesAfterStart = curEnemies.map((e, i) =>
+          i === enemyIdx ? startRes.combatant : e
+        );
+        setEnemies(enemiesAfterStart);
+        if (startRes.floats.length > 0) {
+          pushFloats(startRes.floats.map((f) => ({ ...f, targetSlot: enemyIdx })));
+        }
 
-      // Tick enemy's start-of-turn Buffs/Debuffs (Burn, Poison, Regen, Stun, Sleep, Frozen, Chaos)
-      const startRes = processTurnStart(enemy, 'enemy');
-      const enemiesAfterStart = curEnemies.map((e, i) =>
-        i === enemyIdx ? startRes.combatant : e
-      );
-      setEnemies(enemiesAfterStart);
-      if (startRes.floats.length > 0) {
-        showFloats(startRes.floats);
-      }
-
-      if (startRes.diedFromDot) {
-        setCombatLog(startRes.log ?? `${enemy.name} succumbed to status effects!`);
-        const allDeadAfterDot = enemiesAfterStart.every((e) => e.hp <= 0);
-        if (allDeadAfterDot) {
+        if (startRes.diedFromDot) {
+          setCombatLog(startRes.log ?? `${enemy.name} succumbed to status effects!`);
+          const allDeadAfterDot = enemiesAfterStart.every((e) => e.hp <= 0);
           setTimeout(() => {
-            pendingDoneRef.current = () => concludeBattle(true);
-            stageRef.current?.playSequence('player_win');
-          }, 500);
-        } else {
+            if (!mountedRef.current) return;
+            if (allDeadAfterDot) {
+              armSequenceCallbacks(null, () => concludeBattle(true));
+              stageRef.current?.playSequence('player_win');
+            } else {
+              gaugesRef.current[`ene_${enemyIdx}`] = 0;
+              setTimelineGauges({ ...gaugesRef.current });
+              setActiveActorId(null);
+              stepTimeline(curPlayer, enemiesAfterStart, curCd);
+            }
+          }, Math.round(620 * delayScale));
+          return;
+        }
+
+        if (startRes.skipTurn) {
+          setCombatLog(startRes.log ?? `${enemy.name} is ${startRes.skipReason} and skips their turn!`);
           setTimeout(() => {
+            if (!mountedRef.current) return;
             gaugesRef.current[`ene_${enemyIdx}`] = 0;
             setTimelineGauges({ ...gaugesRef.current });
             setActiveActorId(null);
             stepTimeline(curPlayer, enemiesAfterStart, curCd);
-          }, 750);
+          }, Math.round(700 * delayScale));
+          return;
         }
-        return;
-      }
 
-      if (startRes.skipTurn) {
-        setCombatLog(startRes.log ?? `${enemy.name} is ${startRes.skipReason} and skips their turn!`);
+        setCombatLog(
+          startRes.log
+            ? `${startRes.log} ${enemy.name}'s turn!`
+            : `${enemy.name}'s turn! (AGI ${getEffectiveAgility(startRes.combatant)})`
+        );
+
         setTimeout(() => {
+          if (!mountedRef.current) return;
+          const attacker = enemiesRef.current[enemyIdx];
+          const latestPlayer = playerRef.current;
+          if (!attacker || attacker.hp <= 0 || latestPlayer.hp <= 0) return;
+
           gaugesRef.current[`ene_${enemyIdx}`] = 0;
           setTimelineGauges({ ...gaugesRef.current });
           setActiveActorId(null);
-          stepTimeline(curPlayer, enemiesAfterStart, curCd);
-        }, 780);
+
+          const enemyMeta = enemiesByIdRef.current[attacker.id];
+          const atkPool = (enemyMeta?.attacks ?? []).map((atk, idx) => ({ ...atk, index: idx }));
+          const readyPool = atkPool.filter((atk) => !((attacker.attackCooldowns?.[atk.index] ?? 0) > 0));
+          const usablePool = readyPool.length > 0 ? readyPool : atkPool;
+          const chosenAtk =
+            usablePool.length > 0
+              ? usablePool[Math.floor(Math.random() * usablePool.length)]
+              : undefined;
+
+          const enemyOut: TurnOutcome = executeEnemyTurn(
+            latestPlayer,
+            attacker,
+            curCd,
+            chosenAtk?.effects,
+            chosenAtk
+          );
+          const playerKilled = enemyOut.player.hp <= 0;
+          const enemiesAfterAtk = enemiesRef.current.map((e, i) =>
+            i === enemyIdx ? enemyOut.enemy : e
+          );
+          const allEnemiesDeadAfterReflect = enemiesAfterAtk.every((e) => e.hp <= 0);
+
+          armSequenceCallbacks(
+            () => {
+              setPlayer(enemyOut.player);
+              setEnemies(enemiesAfterAtk);
+              setCooldowns(enemyOut.cooldowns);
+              setCombatLog(enemyOut.log);
+              pushFloats(
+                enemyOut.floats.map((f) =>
+                  f.target === 'enemy' ? { ...f, targetSlot: enemyIdx } : f
+                )
+              );
+              if (enemyOut.didCrit) triggerCritShake();
+            },
+            () => {
+              if (playerKilled) {
+                concludeBattle(false);
+              } else if (allEnemiesDeadAfterReflect) {
+                armSequenceCallbacks(null, () => concludeBattle(true));
+                stageRef.current?.playSequence('player_win');
+              } else {
+                stepTimeline(enemyOut.player, enemiesAfterAtk, enemyOut.cooldowns);
+              }
+            }
+          );
+
+          stageRef.current?.playSequence(
+            playerKilled ? `e_atk_s${enemyIdx}_kill` : `e_atk_s${enemyIdx}`
+          );
+        }, Math.round(520 * delayScale));
+      }
+    },
+    [armSequenceCallbacks, concludeBattle, pushFloats, triggerCritShake]
+  );
+
+  const handleStageEvent = useCallback(
+    (ev: StageEvent) => {
+      if (ev.type === 'STAGE_READY') {
+        setStageReady(true);
+        stageRef.current?.setSpeed(speedRef.current);
+        const ids = equippedSkillsKey.split(',').filter(Boolean).slice(0, 6);
+        if (ids.length > 0) {
+          const iconsUrl = buildSkillIconsSwfUrl(serverUrl, ids.join(','));
+          stageRef.current?.captureSkillIcons(iconsUrl, ids);
+        }
+        setCombatLog(
+          `${activeBattle?.mission.name ?? 'Battle'} — ${initialEnemies.length} enemy`
+        );
+        setTimeout(() => {
+          stepTimeline(playerRef.current, enemiesRef.current, cooldownsRef.current);
+        }, 220);
+        return;
+      }
+      if (ev.type === 'SKILL_ICONS') {
+        setSkillIcons((prev) => ({ ...prev, ...ev.icons }));
+        return;
+      }
+      if (ev.type === 'ANIM_HIT') {
+        pendingHitRef.current?.();
+        return;
+      }
+      if (ev.type === 'ANIM_DONE') {
+        pendingDoneRef.current?.();
+        return;
+      }
+    },
+    [activeBattle?.mission.name, equippedSkillsKey, initialEnemies.length, serverUrl, stepTimeline]
+  );
+
+  const handlePlayerMove = useCallback(
+    (action: { type: 'attack' } | { type: 'charge' } | { type: 'skill'; skill: SkillDef }) => {
+      if (turn !== 'player' || !stageReady) return;
+      playClickSfx(serverUrl);
+      setShowItems(false);
+      setInspectedSkill(null);
+
+      const curEnemies = enemiesRef.current;
+      const activeTargetIdx =
+        curEnemies[targetIdx] && curEnemies[targetIdx].hp > 0
+          ? targetIdx
+          : curEnemies.findIndex((e) => e.hp > 0);
+      if (activeTargetIdx === -1) return;
+
+      const skEffects =
+        action.type === 'skill' ? skillEffectsByIdRef.current[action.skill.id] : undefined;
+      const outcome = executePlayerActionMulti(
+        playerRef.current,
+        curEnemies,
+        activeTargetIdx,
+        cooldownsRef.current,
+        action,
+        skEffects
+      );
+
+      if (action.type === 'skill' && outcome.log.startsWith('Not enough CP')) {
+        setCombatLog(outcome.log);
         return;
       }
 
-      setCombatLog(
-        startRes.log
-          ? `${startRes.log} ${enemy.name}'s turn!`
-          : `${enemy.name}'s turn! (Agility: ${getEffectiveAgility(startRes.combatant)})`
-      );
+      setCooldowns(outcome.cooldowns);
+      setTurn('animating');
 
-      // Smooth delay so the player sees the enemy token glide into the ACTION zone on the timeline bar!
-      setTimeout(() => {
-        const attacker = enemiesRef.current[enemyIdx];
-        const latestPlayer = playerRef.current;
-        if (!attacker || attacker.hp <= 0 || latestPlayer.hp <= 0) return;
+      gaugesRef.current['player'] = 0;
+      setTimelineGauges({ ...gaugesRef.current });
+      setActiveActorId(null);
 
-        // Reset enemy's gauge immediately when attack begins so token glides to 0 during action
-        gaugesRef.current[`ene_${enemyIdx}`] = 0;
-        setTimelineGauges({ ...gaugesRef.current });
-        setActiveActorId(null);
+      const updatedEnemies = outcome.enemies;
+      const targetKilled = updatedEnemies[activeTargetIdx].hp <= 0;
+      const aliveSlotsAfter = updatedEnemies
+        .map((e, i) => (e.hp > 0 ? i : -1))
+        .filter((i) => i !== -1);
+      const allEnemiesDead = aliveSlotsAfter.length === 0;
+      const playerDiedFromReflect = outcome.player.hp <= 0;
 
-        // Pick one of the enemy's off-cooldown authentic attacks from enemy.json (exact dmg, cooldown & effects)
-        const enemyMeta = enemiesByIdRef.current[attacker.id];
-        const atkPool = (enemyMeta?.attacks ?? []).map((atk, idx) => ({ ...atk, index: idx }));
-        const readyPool = atkPool.filter((atk) => !((attacker.attackCooldowns?.[atk.index] ?? 0) > 0));
-        const usablePool = readyPool.length > 0 ? readyPool : atkPool;
-        const chosenAtk =
-          usablePool.length > 0
-            ? usablePool[Math.floor(Math.random() * usablePool.length)]
-            : undefined;
-
-        const enemyOut: TurnOutcome = executeEnemyTurn(
-          latestPlayer,
-          attacker,
-          curCd,
-          chosenAtk?.effects,
-          chosenAtk
+      if (action.type === 'skill') {
+        setPlayer(outcome.player);
+        setCombatLog(
+          `${playerRef.current.name} casts ${outcome.isAoE ? 'AoE ' : ''}${action.skill.name}!`
         );
-        const playerKilled = enemyOut.player.hp <= 0;
-        const enemiesAfterAtk = enemiesRef.current.map((e, i) =>
-          i === enemyIdx ? enemyOut.enemy : e
-        );
-        const allEnemiesDeadAfterReflect = enemiesAfterAtk.every((e) => e.hp <= 0);
+      }
 
-        pendingHitRef.current = () => {
-          setPlayer(enemyOut.player);
-          setEnemies(enemiesAfterAtk);
-          setCooldowns(enemyOut.cooldowns);
-          setCombatLog(enemyOut.log);
-          showFloats(enemyOut.floats);
-        };
-
-        pendingDoneRef.current = () => {
-          if (playerKilled) {
+      armSequenceCallbacks(
+        () => {
+          setPlayer(outcome.player);
+          setEnemies(updatedEnemies);
+          setCombatLog(outcome.log);
+          pushFloats(outcome.floats);
+          if (outcome.didCrit) triggerCritShake();
+          if (targetKilled && !allEnemiesDead) {
+            setTargetIdx(aliveSlotsAfter[0]);
+          }
+        },
+        () => {
+          if (playerDiedFromReflect) {
             concludeBattle(false);
-          } else if (allEnemiesDeadAfterReflect) {
-            pendingDoneRef.current = () => concludeBattle(true);
+          } else if (allEnemiesDead) {
+            armSequenceCallbacks(null, () => concludeBattle(true));
             stageRef.current?.playSequence('player_win');
           } else {
-            stepTimeline(enemyOut.player, enemiesAfterAtk, enemyOut.cooldowns);
+            stepTimeline(outcome.player, updatedEnemies, outcome.cooldowns);
           }
-        };
+        }
+      );
 
+      if (action.type === 'charge') {
+        stageRef.current?.playSequence('player_charge');
+      } else if (action.type === 'attack') {
         stageRef.current?.playSequence(
-          playerKilled ? `e_atk_s${enemyIdx}_kill` : `e_atk_s${enemyIdx}`
+          targetKilled ? `p_atk_t${activeTargetIdx}_kill` : `p_atk_t${activeTargetIdx}`
         );
-      }, 650);
-    }
-  };
+      } else if (action.type === 'skill') {
+        const seqName = targetKilled
+          ? `skill_${action.skill.id}_t${activeTargetIdx}_kill`
+          : `skill_${action.skill.id}_t${activeTargetIdx}`;
+        stageRef.current?.playSequence(seqName);
+      }
+    },
+    [armSequenceCallbacks, concludeBattle, pushFloats, serverUrl, stageReady, stepTimeline, targetIdx, triggerCritShake, turn]
+  );
 
-  const handlePlayerMove = (
-    action: { type: 'attack' } | { type: 'charge' } | { type: 'skill'; skill: SkillDef }
-  ) => {
-    if (turn !== 'player' || !stageReady) return;
+  const handleUseConsumable = (item: BattleConsumable) => {
+    if (turn !== 'player' || !stageReady || item.qty <= 0) return;
     playClickSfx(serverUrl);
+    setShowItems(false);
 
-    // Ensure target is an alive enemy
-    const activeTargetIdx =
-      enemies[targetIdx] && enemies[targetIdx].hp > 0
-        ? targetIdx
-        : enemies.findIndex((e) => e.hp > 0);
-    if (activeTargetIdx === -1) return;
-
-    const targetEnemy = enemies[activeTargetIdx];
-    const skEffects =
-      action.type === 'skill' ? skillEffectsByIdRef.current[action.skill.id] : undefined;
-    const outcome = executePlayerAction(player, targetEnemy, cooldowns, action, skEffects);
-    setCooldowns(outcome.cooldowns);
+    const out = executeConsumableAction(playerRef.current, cooldownsRef.current, item.id);
+    setConsumables((prev) =>
+      prev.map((c) => (c.id === item.id ? { ...c, qty: Math.max(0, c.qty - 1) } : c))
+    );
+    setCooldowns(out.cooldowns);
     setTurn('animating');
 
-    // Reset player's gauge immediately upon initiating move so token glides back to 0 during the attack
     gaugesRef.current['player'] = 0;
     setTimelineGauges({ ...gaugesRef.current });
     setActiveActorId(null);
 
-    const updatedEnemies = enemies.map((e, i) =>
-      i === activeTargetIdx ? outcome.enemy : e
+    armSequenceCallbacks(
+      () => {
+        setPlayer(out.player);
+        setCombatLog(out.log);
+        pushFloats(out.floats);
+      },
+      () => {
+        stepTimeline(out.player, enemiesRef.current, out.cooldowns);
+      }
     );
-    const targetKilled = outcome.enemy.hp <= 0;
-    const aliveSlotsAfter = updatedEnemies
-      .map((e, i) => (e.hp > 0 ? i : -1))
-      .filter((i) => i !== -1);
-    const allEnemiesDead = aliveSlotsAfter.length === 0;
+    stageRef.current?.playSequence('player_charge');
+  };
 
-    if (action.type === 'skill') {
-      setPlayer(outcome.player);
-      setCombatLog(`${player.name} casts ${action.skill.name} on ${targetEnemy.name}!`);
-    }
-
-    pendingHitRef.current = () => {
-      setPlayer(outcome.player);
-      setEnemies(updatedEnemies);
-      setCombatLog(outcome.log);
-      showFloats(outcome.floats);
-      if (targetKilled && !allEnemiesDead) {
-        setTargetIdx(aliveSlotsAfter[0]);
-      }
-    };
-
-    pendingDoneRef.current = () => {
-      if (allEnemiesDead) {
-        pendingDoneRef.current = () => concludeBattle(true);
-        stageRef.current?.playSequence('player_win');
-      } else {
-        stepTimeline(outcome.player, updatedEnemies, outcome.cooldowns);
-      }
-    };
-
-    if (action.type === 'charge') {
-      stageRef.current?.playSequence('player_charge');
-    } else if (action.type === 'attack') {
-      stageRef.current?.playSequence(
-        targetKilled ? `p_atk_t${activeTargetIdx}_kill` : `p_atk_t${activeTargetIdx}`
+  // Auto-Battle Hook
+  useEffect(() => {
+    if (!autoBattle || turn !== 'player' || !stageReady || showFleeModal || inspectedUnit || inspectedSkill) return;
+    const delay = speed === 2 ? 220 : 420;
+    const timer = setTimeout(() => {
+      if (!mountedRef.current || !autoRef.current) return;
+      const chosen = chooseAutoBattleAction(
+        playerRef.current,
+        enemiesRef.current,
+        skills,
+        cooldownsRef.current,
+        skillEffectsByIdRef.current
       );
-    } else if (action.type === 'skill') {
-      const seqName = targetKilled
-        ? `skill_${action.skill.id}_t${activeTargetIdx}_kill`
-        : `skill_${action.skill.id}_t${activeTargetIdx}`;
-      stageRef.current?.playSequence(seqName);
+      handlePlayerMove(chosen);
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [autoBattle, turn, stageReady, showFleeModal, inspectedUnit, inspectedSkill, speed, skills, handlePlayerMove]);
+
+  const handleAttemptFlee = () => {
+    playClickSfx(serverUrl);
+    setShowFleeModal(false);
+    if (turn !== 'player') return;
+    const res = attemptFlee(playerRef.current, enemiesRef.current);
+    setCombatLog(res.log);
+    if (res.escaped) {
+      setAutoBattle(false);
+      setTimeout(() => {
+        setActiveBattle(null);
+        navigate('missions');
+      }, 450);
+    } else {
+      setTurn('animating');
+      gaugesRef.current['player'] = 0;
+      setTimelineGauges({ ...gaugesRef.current });
+      setActiveActorId(null);
+      pushFloats([{ id: Date.now(), target: 'player', text: 'FLEE FAILED!', kind: 'debuff' }]);
+      setTimeout(() => {
+        stepTimeline(playerRef.current, enemiesRef.current, cooldownsRef.current);
+      }, 650);
     }
   };
 
   const handleExit = () => {
     playClickSfx(serverUrl);
+    clearWatchdogs();
+    setShowFleeModal(false);
+    setAutoBattle(false);
     setActiveBattle(null);
     navigate('missions');
   };
 
-  const hpPct = (c: Combatant) => `${Math.max(0, Math.round((c.hp / c.maxHp) * 100))}%`;
-  const cpPct = (c: Combatant) => `${Math.max(0, Math.round((c.cp / c.maxCp) * 100))}%`;
+  const hpPct = (c: Combatant) => `${Math.max(0, Math.round((c.hp / Math.max(1, c.maxHp)) * 100))}%`;
+  const cpPct = (c: Combatant) => `${Math.max(0, Math.round((c.cp / Math.max(1, c.maxCp)) * 100))}%`;
 
   const playerFloats = floats.filter((f) => f.target === 'player');
   const enemyFloats = floats.filter((f) => f.target === 'enemy');
   const allDead = enemies.every((e) => e.hp <= 0);
   const skillsSealed = isSkillsRestricted(player);
   const chargeLocked = isChargeDisabled(player);
+  const totalConsumablesLeft = consumables.reduce((sum, c) => sum + c.qty, 0);
 
   const renderStatusBadges = (statuses?: StatusEffect[]) => {
     if (!statuses || statuses.length === 0) return null;
     return (
       <View style={styles.statusRow}>
-        {statuses.slice(0, 5).map((st) => (
+        {statuses.slice(0, 4).map((st) => (
           <View
             key={st.id}
             style={[
@@ -544,483 +922,1270 @@ export function BattleScreen() {
     );
   };
 
+  const playerPt = swfToScreen(SWF_PLAYER_X, SWF_PLAYER_Y, stageSize.width, stageSize.height);
+  const enemyFormation =
+    SWF_ENEMY_FORMATIONS[Math.min(3, Math.max(1, enemies.length))] ?? SWF_ENEMY_FORMATIONS[1];
+
   return (
-    <SafeAreaView style={styles.root}>
-      {/* Top HUD: Player vs 1..3 Simultaneous Enemies */}
-      <View style={styles.hud}>
-        <View style={styles.hudCard}>
-          <Text style={styles.hudName} numberOfLines={1}>
-            {player.name} (Lv.{player.level})
-          </Text>
-          <View style={styles.barBg}>
-            <View style={[styles.barHp, { width: hpPct(player) as `${number}%` }]} />
-          </View>
-          <Text style={styles.barLabel}>
-            HP {player.hp}/{player.maxHp}
-          </Text>
-          <View style={styles.barBg}>
-            <View style={[styles.barCp, { width: cpPct(player) as `${number}%` }]} />
-          </View>
-          <Text style={styles.barLabel}>
-            CP {player.cp}/{player.maxCp}
-          </Text>
-          {renderStatusBadges(player.statuses)}
-        </View>
-
-        <View style={styles.turnBox}>
-          <Text style={styles.missionTitle} numberOfLines={1}>
-            {activeBattle?.mission.name ?? 'Battle'}
-          </Text>
-          <Text style={styles.turnBadge}>
-            {!stageReady
-              ? 'LOADING STAGE...'
-              : turn === 'player'
-                ? enemies.length > 1
-                  ? 'YOUR TURN (TAP TARGET)'
-                  : 'YOUR TURN'
-                : turn === 'animating'
-                  ? 'ACTION...'
-                  : 'BATTLE END'}
-          </Text>
-        </View>
-
-        <View style={styles.enemiesHud}>
-          {enemies.map((en, idx) => {
-            const dead = en.hp <= 0;
-            const selected = idx === targetIdx && !dead;
-            return (
-              <Pressable
-                key={`${en.id}-${idx}`}
-                style={[
-                  styles.enemyMiniCard,
-                  selected && styles.enemyMiniSelected,
-                  dead && styles.enemyMiniDead,
-                ]}
-                onPress={() => !dead && setTargetIdx(idx)}
-                disabled={dead}
-              >
-                <View style={styles.enemyRowTop}>
-                  <Text style={styles.enemyMiniName} numberOfLines={1}>
-                    {selected ? '🎯 ' : ''}
-                    {en.name}
-                  </Text>
-                  <Text style={styles.enemyMiniHp}>
-                    {dead ? 'KO' : `${en.hp}/${en.maxHp}`}
-                  </Text>
-                </View>
-                <View style={styles.barBgSmall}>
-                  <View style={[styles.barHp, { width: hpPct(en) as `${number}%` }]} />
-                </View>
-                {!dead && renderStatusBadges(en.statuses)}
-              </Pressable>
-            );
-          })}
-        </View>
-      </View>
-
-      {/* Center Unified 36 FPS Stage (1 WebView, 1 Ruffle Instance, 1..3 Simultaneous Enemies!) */}
-      <View style={styles.arenaWrap}>
+    <View
+      style={styles.root}
+      onLayout={(e) => {
+        const { width, height } = e.nativeEvent.layout;
+        if (width > 0 && height > 0) {
+          setStageSize((prev) =>
+            prev.width === width && prev.height === height ? prev : { width, height }
+          );
+        }
+      }}
+    >
+      {/* 1) FULL-SCREEN 1 LAYAR 36 FPS BATTLE STAGE (Background + Fighters + Jutsu) */}
+      <Animated.View style={[styles.fullStage, { transform: [{ translateX: shakeAnim }] }]}>
         <RuffleStageView
           ref={stageRef}
           baseUrl={serverUrl}
           onEvent={handleStageEvent}
         />
+      </Animated.View>
 
-        <View pointerEvents="none" style={styles.leftFloatZone}>
-          {playerFloats.map((f) => (
-            <Text
-              key={f.id}
-              style={[
-                styles.floatText,
-                f.kind === 'crit' && styles.floatCrit,
-                f.kind === 'cp' && styles.floatCp,
-                f.kind === 'dodge' && styles.floatDodge,
-                f.kind === 'heal' && styles.floatHeal,
-                f.kind === 'buff' && styles.floatBuff,
-                f.kind === 'debuff' && styles.floatDebuff,
-              ]}
-            >
-              {f.text}
+      <LoadingScreenOverlay visible={!stageReady} />
+
+      {/* 2) TOP OVERLAY: Mission Info (Left) + Ninja Horizon ATB Timeline (Center) + Speed/Auto (Right) */}
+      <View style={styles.topOverlay} pointerEvents="box-none">
+        <View style={styles.missionChip}>
+          <Text style={styles.missionTitle} numberOfLines={1}>
+            {activeBattle?.mission.name ?? 'Battle'}
+          </Text>
+          <View style={styles.missionSubRow}>
+            <Text style={styles.roundBadge}>TURN {Math.max(1, turnCount)}</Text>
+            <Text style={[styles.turnStateText, turn === 'player' && styles.turnStatePlayer]}>
+              {!stageReady ? 'LOADING...' : turn === 'player' ? 'YOUR TURN' : 'ACTION'}
             </Text>
-          ))}
-        </View>
-
-        <View pointerEvents="none" style={styles.rightFloatZone}>
-          {enemyFloats.map((f) => (
-            <Text
-              key={f.id}
-              style={[
-                styles.floatText,
-                f.kind === 'crit' && styles.floatCrit,
-                f.kind === 'cp' && styles.floatCp,
-                f.kind === 'dodge' && styles.floatDodge,
-                f.kind === 'heal' && styles.floatHeal,
-                f.kind === 'buff' && styles.floatBuff,
-                f.kind === 'debuff' && styles.floatDebuff,
-              ]}
-            >
-              {f.text}
-            </Text>
-          ))}
-        </View>
-
-        <View style={styles.logStrip}>
-          <Text style={styles.logText}>{combatLog}</Text>
-        </View>
-
-        {turn === 'done' && finishResult && (
-          <View style={styles.resultOverlay}>
-            <View style={styles.resultCard}>
-              <Text style={styles.resultTitle}>
-                {allDead ? 'VICTORY!' : 'DEFEAT'}
-              </Text>
-              {finishing ? (
-                <ActivityIndicator color="#F59E0B" style={{ marginVertical: 12 }} />
-              ) : (
-                <View style={styles.resultBody}>
-                  <Text style={styles.rewardLine}>
-                    +{finishResult.xp_reward} XP  •  +{finishResult.gold_reward} Gold
-                  </Text>
-                  <Text style={styles.rewardSub}>
-                    Current: Lv.{finishResult.level} | Total Gold: {finishResult.gold}
-                  </Text>
-                  {finishResult.level_up && (
-                    <Text style={styles.levelUp}>LEVEL UP! (+1 Attribute Point)</Text>
-                  )}
-                </View>
-              )}
-              <Pressable style={styles.doneBtn} onPress={handleExit}>
-                <Text style={styles.doneBtnText}>Back to Missions</Text>
-              </Pressable>
-            </View>
-          </View>
-        )}
-      </View>
-
-      {/* Authentic Ninja Saga Agility Timeline Bar */}
-      <View style={styles.timelineBarWrap}>
-        <View style={styles.timelineHeaderRow}>
-          <View style={styles.timelineTitlePill}>
-            <Text style={styles.timelineIcon}>⚡</Text>
-            <Text style={styles.timelineTitleText}>AGILITY TIMELINE</Text>
-          </View>
-          <View style={styles.timelineActionPill}>
-            <Text style={styles.timelineActionText}>READY ➔</Text>
           </View>
         </View>
 
-        <View style={styles.timelineTrack}>
-          {/* Milestone markers */}
-          <View style={[styles.timelineTick, { left: '25%' }]} />
-          <View style={[styles.timelineTick, { left: '50%' }]} />
-          <View style={[styles.timelineTick, { left: '75%' }]} />
+        {/* Ninja Horizon Top-Center Golden ATB Agility Rail */}
+        <View style={styles.atbRailOuter}>
+          <View style={styles.atbStartCap}>
+            <Text style={styles.atbCapText}>ATB</Text>
+          </View>
 
-          {/* Player Token with smooth 60fps sliding & ready pulse */}
-          {player.hp > 0 && (
-            <TimelineToken
-              id="player"
-              name="YOU"
-              agility={getEffectiveAgility(player)}
-              gauge={timelineGauges['player'] ?? 0}
-              isActive={activeActorId === 'player'}
-              isPlayer={true}
-              emoji="🥷"
-              turnKey={turnCount}
-            />
-          )}
+          <View style={styles.atbTrack}>
+            <View style={[styles.atbTick, { left: '25%' }]} />
+            <View style={[styles.atbTick, { left: '50%' }]} />
+            <View style={[styles.atbTick, { left: '75%' }]} />
+            <View style={styles.atbRailGlow} />
 
-          {/* Enemies Tokens with smooth 60fps sliding & ready pulse */}
-          {enemies.map((en, idx) => {
-            if (en.hp <= 0) return null;
-            const gauge = timelineGauges[`ene_${idx}`] ?? 0;
-            const isActive = activeActorId === `ene_${idx}`;
-            return (
+            {player.hp > 0 && (
               <TimelineToken
-                key={`timeline-en-${en.id}-${idx}`}
-                id={`ene_${idx}`}
-                name={enemies.length > 1 ? `E${idx + 1}` : 'FOE'}
-                agility={getEffectiveAgility(en)}
-                gauge={gauge}
-                isActive={isActive}
-                isPlayer={false}
-                emoji="👺"
+                id="player"
+                name="YOU"
+                agility={getEffectiveAgility(player)}
+                gauge={timelineGauges['player'] ?? 0}
+                isActive={activeActorId === 'player'}
+                isPlayer={true}
+                emoji="🥷"
                 turnKey={turnCount}
               />
-            );
-          })}
+            )}
+
+            {pet && (
+              <TimelineToken
+                id="pet"
+                name="PET"
+                agility={getEffectiveAgility(pet)}
+                gauge={timelineGauges['pet'] ?? 0}
+                isActive={activeActorId === 'pet'}
+                isPlayer={true}
+                isPet={true}
+                emoji="🐾"
+                turnKey={turnCount}
+              />
+            )}
+
+            {enemies.map((en, idx) => {
+              if (en.hp <= 0) return null;
+              return (
+                <TimelineToken
+                  key={`atb-en-${en.id}-${idx}`}
+                  id={`ene_${idx}`}
+                  name={enemies.length > 1 ? `E${idx + 1}` : 'FOE'}
+                  agility={getEffectiveAgility(en)}
+                  gauge={timelineGauges[`ene_${idx}`] ?? 0}
+                  isActive={activeActorId === `ene_${idx}`}
+                  isPlayer={false}
+                  emoji="👺"
+                  turnKey={turnCount}
+                />
+              );
+            })}
+          </View>
+
+          <View style={styles.atbActCap}>
+            <Text style={styles.atbActText}>⚡ACT</Text>
+          </View>
+        </View>
+
+        {/* Speed (1x/2x) & AUTO Controls */}
+        <View style={styles.topRightControls}>
+          <Pressable
+            style={[styles.ctrlPill, speed === 2 && styles.ctrlPillActive]}
+            onPress={toggleSpeed}
+          >
+            <Text style={[styles.ctrlPillText, speed === 2 && styles.ctrlPillTextActive]}>
+              {speed}x
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[styles.ctrlPill, autoBattle && styles.ctrlAutoActive]}
+            onPress={toggleAuto}
+          >
+            <Text style={[styles.ctrlPillText, autoBattle && styles.ctrlPillTextActive]}>
+              {autoBattle ? 'AUTO ON' : 'AUTO'}
+            </Text>
+          </Pressable>
         </View>
       </View>
 
-      {/* Bottom Action Bar */}
-      <View style={styles.actionBar}>
+      {/* 3) PIXEL-ALIGNED HP & CP BARS BEHIND EACH CHARACTER (Symmetrical: Left of Player, Right of Enemies!) */}
+      <View style={styles.unitPlatesLayer} pointerEvents="box-none">
+        {/* Player HP & CP Plate — directly behind Player (to the left) & vertically centered on torso; hold to inspect */}
         <Pressable
+          delayLongPress={260}
+          onLongPress={() => {
+            playClickSfx(serverUrl);
+            setInspectedUnit({ side: 'player', idx: 0 });
+          }}
           style={[
-            styles.actBtn,
-            styles.atkBtn,
-            (turn !== 'player' || !stageReady) && styles.disabledBtn,
+            styles.unitPlate,
+            styles.playerPlateBorder,
+            {
+              left: Math.max(8, playerPt.x - 40 * playerPt.scale - UNIT_PLATE_W),
+              top: playerPt.y - SWF_CHAR_CENTER_Y_OFFSET * playerPt.scale - UNIT_PLATE_H / 2,
+            },
           ]}
-          disabled={turn !== 'player' || !stageReady}
-          onPress={() => handlePlayerMove({ type: 'attack' })}
         >
-          <Text style={styles.actTitle}>Attack</Text>
-          <Text style={styles.actSub}>0 CP</Text>
+          <View style={styles.plateNameRow}>
+            <Text style={styles.plateName} numberOfLines={1}>
+              {player.name}
+            </Text>
+            <Text style={styles.plateLv}>Lv.{player.level}</Text>
+          </View>
+          <View style={styles.unitBarBg}>
+            <View style={[styles.unitHpFill, { width: hpPct(player) as `${number}%` }]} />
+            <Text style={styles.unitBarText}>
+              HP {player.hp}/{player.maxHp}
+            </Text>
+          </View>
+          <View style={styles.unitBarBg}>
+            <View style={[styles.unitCpFill, { width: cpPct(player) as `${number}%` }]} />
+            <Text style={styles.unitBarText}>
+              CP {player.cp}/{player.maxCp}
+            </Text>
+          </View>
+          {renderStatusBadges(player.statuses)}
         </Pressable>
 
-        <Pressable
-          style={[
-            styles.actBtn,
-            styles.chgBtn,
-            (turn !== 'player' || !stageReady || chargeLocked) && styles.disabledBtn,
-          ]}
-          disabled={turn !== 'player' || !stageReady || chargeLocked}
-          onPress={() => handlePlayerMove({ type: 'charge' })}
-        >
-          <Text style={styles.actTitle}>Charge</Text>
-          <Text style={styles.actSub}>{chargeLocked ? 'LOCKED' : '+25% CP'}</Text>
-        </Pressable>
+        {/* Enemy HP & CP Plates — directly behind each Enemy (to the right) & vertically aligned */}
+        {enemies.map((en, idx) => {
+          const dead = en.hp <= 0;
+          const selected = idx === targetIdx && !dead;
+          const [exSwf, eySwf] = enemyFormation[idx] ?? enemyFormation[0];
+          const ePt = swfToScreen(exSwf, eySwf, stageSize.width, stageSize.height);
+          const plateLeft = Math.min(
+            stageSize.width - UNIT_PLATE_W - 8,
+            ePt.x + 40 * ePt.scale
+          );
+          const plateTop =
+            ePt.y - SWF_CHAR_CENTER_Y_OFFSET * ePt.scale - UNIT_PLATE_H / 2;
 
-        {skills.slice(0, 6).map((sk) => {
-          const cd = cooldowns[sk.id] ?? 0;
-          const effCpCost = getEffectiveSkillCpCost(player, sk.cp_cost || 0);
-          const noCp = player.cp < effCpCost;
-          const disabled = turn !== 'player' || !stageReady || cd > 0 || noCp || skillsSealed;
           return (
             <Pressable
-              key={sk.id}
-              style={[styles.actBtn, styles.skillBtn, disabled && styles.disabledBtn]}
-              disabled={disabled}
-              onPress={() => handlePlayerMove({ type: 'skill', skill: sk })}
+              key={`plate-${en.id}-${idx}`}
+              delayLongPress={260}
+              style={[
+                styles.unitPlate,
+                styles.enemyPlateBorder,
+                { left: plateLeft, top: plateTop },
+                selected && styles.enemyPlateSelected,
+                dead && styles.enemyPlateDead,
+              ]}
+              onPress={() => !dead && setTargetIdx(idx)}
+              onLongPress={() => {
+                playClickSfx(serverUrl);
+                setInspectedUnit({ side: 'enemy', idx });
+              }}
             >
-              <Text style={styles.actTitle} numberOfLines={1}>
-                {sk.name}
-              </Text>
-              <Text style={styles.actSub}>
-                {skillsSealed ? 'SEALED' : cd > 0 ? `CD ${cd}t` : `${effCpCost} CP`}
-              </Text>
+              {selected && (
+                <View style={styles.targetPin}>
+                  <Text style={styles.targetPinText}>🎯</Text>
+                </View>
+              )}
+              <View style={styles.plateNameRow}>
+                <Text style={styles.plateName} numberOfLines={1}>
+                  {en.name}
+                </Text>
+                <Text style={styles.plateLv}>Lv.{en.level}</Text>
+              </View>
+              <View style={styles.unitBarBg}>
+                <View style={[styles.unitEnemyHpFill, { width: hpPct(en) as `${number}%` }]} />
+                <Text style={styles.unitBarText}>
+                  {dead ? 'KO' : `HP ${en.hp}/${en.maxHp}`}
+                </Text>
+              </View>
+              <View style={styles.unitBarBg}>
+                <View style={[styles.unitCpFill, { width: cpPct(en) as `${number}%` }]} />
+                <Text style={styles.unitBarText}>
+                  {dead ? '-' : `CP ${en.cp}/${en.maxCp}`}
+                </Text>
+              </View>
+              {!dead && renderStatusBadges(en.statuses)}
             </Pressable>
           );
         })}
-
-        <Pressable style={[styles.actBtn, styles.fleeBtn]} onPress={handleExit}>
-          <Text style={styles.actTitle}>Flee</Text>
-          <Text style={styles.actSub}>Exit</Text>
-        </Pressable>
       </View>
-    </SafeAreaView>
+
+      {/* 4) ANIMATED FLOATING COMBAT POPUPS */}
+      <View pointerEvents="none" style={styles.leftFloatZone}>
+        {playerFloats.map((f, idx) => (
+          <FloatingPopup
+            key={f.id}
+            item={f}
+            index={idx}
+            speedMultiplier={speed}
+            onDone={removeFloat}
+          />
+        ))}
+      </View>
+
+      <View pointerEvents="none" style={styles.rightFloatZone}>
+        {enemyFloats.map((f, idx) => (
+          <FloatingPopup
+            key={f.id}
+            item={f}
+            index={idx}
+            speedMultiplier={speed}
+            onDone={removeFloat}
+          />
+        ))}
+      </View>
+
+      {/* 5) COMPACT COMBAT LOG TOAST (Floats cleanly above Bottom Action Dock) */}
+      <View pointerEvents="none" style={styles.logToastWrap}>
+        <Text style={styles.logToastText} numberOfLines={1}>
+          {combatLog}
+        </Text>
+      </View>
+
+      {/* 6) BATTLE CONSUMABLES POPOVER */}
+      {showItems && (
+        <View style={styles.itemsDrawer}>
+          {consumables.map((item) => (
+            <Pressable
+              key={item.id}
+              style={[styles.itemChip, item.qty <= 0 && styles.disabledBtn]}
+              disabled={item.qty <= 0 || turn !== 'player'}
+              onPress={() => handleUseConsumable(item)}
+            >
+              <Text style={styles.itemIcon}>{item.icon}</Text>
+              <View>
+                <Text style={styles.itemName}>
+                  {item.name} (x{item.qty})
+                </Text>
+                <Text style={styles.itemDesc}>{item.desc}</Text>
+              </View>
+            </Pressable>
+          ))}
+          <Pressable style={styles.itemCloseBtn} onPress={() => setShowItems(false)}>
+            <Text style={styles.itemCloseTxt}>✕</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* 7) NINJA HORIZON FLOATING BOTTOM ACTION DOCK (Attack, Charge, Elemental Jutsu, Item, Flee) */}
+      <View style={styles.bottomDockWrap} pointerEvents="box-none">
+        <View style={styles.bottomDock}>
+          <AttackActionTile
+            disabled={turn !== 'player' || !stageReady}
+            onPress={() => handlePlayerMove({ type: 'attack' })}
+          />
+
+          <ChargeActionTile
+            disabled={turn !== 'player' || !stageReady || chargeLocked}
+            locked={chargeLocked}
+            onPress={() => handlePlayerMove({ type: 'charge' })}
+          />
+
+          <View style={styles.dockDivider} />
+
+          {skills.slice(0, 6).map((sk) => {
+            const cd = cooldowns[sk.id] ?? 0;
+            const effCpCost = getEffectiveSkillCpCost(player, sk.cp_cost || 0);
+            const noCp = player.cp < effCpCost;
+            const disabled = turn !== 'player' || !stageReady || cd > 0 || noCp || skillsSealed;
+            return (
+              <JutsuActionTile
+                key={sk.id}
+                skill={sk}
+                iconUri={skillIcons[sk.id]}
+                cpCost={effCpCost}
+                cooldown={cd}
+                disabled={disabled}
+                sealed={skillsSealed}
+                onPress={() => handlePlayerMove({ type: 'skill', skill: sk })}
+                onLongPress={() => {
+                  playClickSfx(serverUrl);
+                  setInspectedSkill(sk);
+                }}
+              />
+            );
+          })}
+
+          <View style={styles.dockDivider} />
+
+          <ItemActionTile
+            count={totalConsumablesLeft}
+            active={showItems}
+            disabled={turn !== 'player' || !stageReady || totalConsumablesLeft <= 0}
+            onPress={() => {
+              playClickSfx(serverUrl);
+              setShowItems((v) => !v);
+            }}
+          />
+
+          <FleeActionTile
+            onPress={() => {
+              playClickSfx(serverUrl);
+              setShowFleeModal(true);
+            }}
+          />
+        </View>
+      </View>
+
+      {/* Combatant Long-Press Inspector (Stats, Buffs & Debuffs — Ninja Horizon style) */}
+      {inspectedUnit && (() => {
+        const unit =
+          inspectedUnit.side === 'player'
+            ? player
+            : enemies[inspectedUnit.idx];
+        if (!unit) return null;
+        const isP = inspectedUnit.side === 'player';
+        const effAgi = getEffectiveAgility(unit);
+        const baseDmg = unit.weaponDamage ?? unit.baseDamage;
+        const dmgMult = getOutgoingDamageMultiplier(unit);
+        const effDmg = Math.max(1, Math.round(baseDmg * dmgMult));
+        const baseCrit = unit.critChance ?? 0.05;
+        const effCrit = getEffectiveCritChance(unit);
+        const baseDodge = unit.dodgeChance ?? 0.05;
+        const effDodge = getEffectiveUnitDodgeChance(unit);
+        const baseAcc = unit.accuracyChance ?? 0;
+        const effAcc = getEffectiveUnitAccuracyChance(unit);
+
+        const buffs = (unit.statuses ?? []).filter((s) => s.turns > 0 && s.type === 'Buff');
+        const debuffs = (unit.statuses ?? []).filter((s) => s.turns > 0 && s.type === 'Debuff');
+        const pct = (v?: number) => `${Math.round((v ?? 0) * 1000) / 10}%`;
+        const deltaColor = (eff: number, base: number) =>
+          eff > base + 0.0001 ? '#4ADE80' : eff < base - 0.0001 ? '#F87171' : '#F8FAFC';
+        const fmtPctDelta = (eff: number, base: number) => {
+          const d = Math.round((eff - base) * 1000) / 10;
+          if (Math.abs(d) < 0.1) return pct(eff);
+          return `${pct(eff)} (${d > 0 ? '+' : ''}${d}%)`;
+        };
+
+        return (
+          <Pressable style={styles.tooltipOverlay} onPress={() => setInspectedUnit(null)}>
+            <Pressable style={styles.inspectCard} onPress={() => {}}>
+              <View style={styles.inspectHead}>
+                <View style={styles.inspectTitleWrap}>
+                  <View style={[styles.inspectSideTag, isP ? styles.inspectTagPlayer : styles.inspectTagEnemy]}>
+                    <Text style={styles.inspectSideText}>{isP ? 'NINJA' : 'ENEMY'}</Text>
+                  </View>
+                  <Text style={styles.inspectName} numberOfLines={1}>
+                    {unit.name}
+                  </Text>
+                  <Text style={styles.inspectLv}>Lv.{unit.level}</Text>
+                </View>
+                <Pressable style={styles.inspectCloseBtn} onPress={() => setInspectedUnit(null)}>
+                  <Text style={styles.inspectCloseTxt}>✕</Text>
+                </Pressable>
+              </View>
+
+              {/* HP & CP Bars */}
+              <View style={styles.inspectBarsRow}>
+                <View style={styles.inspectBarWrap}>
+                  <View style={[styles.unitHpFill, !isP && styles.unitEnemyHpFill, { width: hpPct(unit) as `${number}%` }]} />
+                  <Text style={styles.inspectBarTxt}>HP {unit.hp} / {unit.maxHp}</Text>
+                </View>
+                <View style={styles.inspectBarWrap}>
+                  <View style={[styles.unitCpFill, { width: cpPct(unit) as `${number}%` }]} />
+                  <Text style={styles.inspectBarTxt}>CP {unit.cp} / {unit.maxCp}</Text>
+                </View>
+              </View>
+
+              {/* Combat Stats Grid (Live Buffed / Debuffed Effective Values!) */}
+              <View style={styles.inspectStatsGrid}>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>⚡ Agility</Text>
+                  <Text style={[styles.inspectStatVal, { color: deltaColor(effAgi, unit.agility) }]}>
+                    {effAgi}
+                    {effAgi !== unit.agility ? ` (${effAgi > unit.agility ? '+' : ''}${effAgi - unit.agility})` : ''}
+                  </Text>
+                </View>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>⚔️ Base DMG</Text>
+                  <Text style={[styles.inspectStatVal, { color: deltaColor(effDmg, baseDmg) }]}>
+                    {effDmg}
+                    {Math.abs(dmgMult - 1) >= 0.01 ? ` (${dmgMult > 1 ? '+' : ''}${Math.round((dmgMult - 1) * 100)}%)` : ''}
+                  </Text>
+                </View>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>🎯 Critical</Text>
+                  <Text style={[styles.inspectStatVal, { color: deltaColor(effCrit, baseCrit) }]}>
+                    {fmtPctDelta(effCrit, baseCrit)}
+                  </Text>
+                </View>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>💨 Dodge</Text>
+                  <Text style={[styles.inspectStatVal, { color: deltaColor(effDodge, baseDodge) }]}>
+                    {fmtPctDelta(effDodge, baseDodge)}
+                  </Text>
+                </View>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>🔍 Accuracy</Text>
+                  <Text style={[styles.inspectStatVal, { color: deltaColor(effAcc, baseAcc) }]}>
+                    {fmtPctDelta(effAcc, baseAcc)}
+                  </Text>
+                </View>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>✨ Purify</Text>
+                  <Text style={styles.inspectStatVal}>{pct(unit.purifyChance)}</Text>
+                </View>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>🛡️ Reactive</Text>
+                  <Text style={styles.inspectStatVal}>{pct(unit.reactiveChance)}</Text>
+                </View>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>🔥 Combust</Text>
+                  <Text style={styles.inspectStatVal}>{pct(unit.combustionChance)}</Text>
+                </View>
+              </View>
+
+              {/* Active Buffs & Debuffs */}
+              <View style={styles.inspectStatusSection}>
+                <Text style={styles.inspectSectionTitle}>
+                  ACTIVE BUFFS ({buffs.length}) & DEBUFFS ({debuffs.length})
+                </Text>
+                {buffs.length === 0 && debuffs.length === 0 ? (
+                  <Text style={styles.inspectEmptyText}>No active buffs or debuffs.</Text>
+                ) : (
+                  <View style={styles.inspectStatusList}>
+                    {[...buffs, ...debuffs].map((st) => (
+                      <View
+                        key={`insp-${st.id}`}
+                        style={[
+                          styles.inspectStatusRow,
+                          st.type === 'Buff' ? styles.inspectRowBuff : styles.inspectRowDebuff,
+                        ]}
+                      >
+                        <Text style={styles.inspectStatusName}>
+                          {st.icon} {st.name}
+                          {st.amount > 0
+                            ? ` (${st.amount}${st.calcType === 'number' ? '' : '%'})`
+                            : ''}
+                        </Text>
+                        <Text style={styles.inspectStatusTurns}>
+                          {st.turns}t
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+              </View>
+            </Pressable>
+          </Pressable>
+        );
+      })()}
+
+      {/* Skill Long-Press Inspector (Ninja Horizon style: real icon, stats, target, description & parsed effects!) */}
+      {inspectedSkill && (() => {
+        const elem = getSkillElementMeta(inspectedSkill.type);
+        const effCp = getEffectiveSkillCpCost(player, inspectedSkill.cp_cost || 0);
+        const skEffs = (skillEffectsByIdRef.current[inspectedSkill.id] ?? []).filter(
+          (e) => e && e.effect && !e.passive
+        );
+        const targetLabel = isSkillAoE(inspectedSkill)
+          ? 'ALL ENEMIES'
+          : String(inspectedSkill.target ?? 'Single').toUpperCase();
+
+        return (
+          <Pressable style={styles.tooltipOverlay} onPress={() => setInspectedSkill(null)}>
+            <Pressable style={styles.inspectCard} onPress={() => {}}>
+              <View style={styles.inspectHead}>
+                <View style={styles.inspectTitleWrap}>
+                  {skillIcons[inspectedSkill.id] ? (
+                    <Image
+                      source={{ uri: skillIcons[inspectedSkill.id] }}
+                      style={styles.inspectSkillIcon}
+                      resizeMode="contain"
+                    />
+                  ) : (
+                    <Text style={{ fontSize: 18 }}>{elem.icon}</Text>
+                  )}
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.inspectName} numberOfLines={1}>
+                      {inspectedSkill.name}
+                    </Text>
+                    <Text style={styles.tooltipElem}>
+                      {elem.icon} {elem.label} • {targetLabel}
+                    </Text>
+                  </View>
+                </View>
+                <Pressable style={styles.inspectCloseBtn} onPress={() => setInspectedSkill(null)}>
+                  <Text style={styles.inspectCloseTxt}>✕</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.inspectStatsGrid}>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>⚔️ Damage</Text>
+                  <Text style={styles.inspectStatVal}>{inspectedSkill.damage}</Text>
+                </View>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>💧 CP Cost</Text>
+                  <Text style={styles.inspectStatVal}>{effCp}</Text>
+                </View>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>⏳ Cooldown</Text>
+                  <Text style={styles.inspectStatVal}>{inspectedSkill.cooldown}t</Text>
+                </View>
+                <View style={styles.inspectStatBox}>
+                  <Text style={styles.inspectStatLabel}>⭐ Req Lv</Text>
+                  <Text style={styles.inspectStatVal}>Lv.{inspectedSkill.level}</Text>
+                </View>
+              </View>
+
+              <Text style={styles.tooltipDesc}>
+                {inspectedSkill.description || 'Ninjutsu technique.'}
+              </Text>
+
+              {skEffs.length > 0 && (
+                <View style={styles.inspectStatusSection}>
+                  <Text style={styles.inspectSectionTitle}>JUTSU EFFECTS</Text>
+                  <View style={styles.inspectStatusList}>
+                    {skEffs.map((ef, i) => {
+                      const isBuff = ef.type === 'Buff' || ef.target === 'self';
+                      return (
+                        <View
+                          key={`skeff-${i}`}
+                          style={[
+                            styles.inspectStatusRow,
+                            isBuff ? styles.inspectRowBuff : styles.inspectRowDebuff,
+                          ]}
+                        >
+                          <Text style={styles.inspectStatusName}>
+                            {ef.effect_name || ef.effect.replace(/_/g, ' ')}
+                            {ef.amount ? ` ${ef.amount}${ef.calc_type === 'number' ? '' : '%'}` : ''}
+                            {ef.chance && ef.chance < 100 ? ` (${ef.chance}%)` : ''}
+                          </Text>
+                          {ef.duration ? (
+                            <Text style={styles.inspectStatusTurns}>{ef.duration}t</Text>
+                          ) : null}
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              )}
+            </Pressable>
+          </Pressable>
+        );
+      })()}
+
+      {/* Flee / Retreat Confirmation Modal */}
+      {showFleeModal && (
+        <View style={styles.resultOverlay}>
+          <View style={styles.fleeCard}>
+            <Text style={styles.fleeTitle}>Retreat from Battle?</Text>
+            <Text style={styles.fleeSub}>
+              Attempt a Ninja Escape using your Agility, or forfeit the mission immediately.
+            </Text>
+            <View style={styles.fleeBtnRow}>
+              <Pressable
+                style={[styles.fleeModalBtn, styles.fleeTryBtn, turn !== 'player' && styles.disabledBtn]}
+                disabled={turn !== 'player'}
+                onPress={handleAttemptFlee}
+              >
+                <Text style={styles.doneBtnText}>Smoke Bomb</Text>
+              </Pressable>
+              <Pressable style={[styles.fleeModalBtn, styles.fleeQuitBtn]} onPress={handleExit}>
+                <Text style={styles.doneBtnText}>Forfeit</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.fleeModalBtn, styles.fleeCancelBtn]}
+                onPress={() => setShowFleeModal(false)}
+              >
+                <Text style={styles.doneBtnText}>Cancel</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      )}
+
+      {/* Victory / Defeat Result Overlay */}
+      {turn === 'done' && (finishResult || finishing) && (
+        <View style={styles.resultOverlay}>
+          <View style={styles.resultCard}>
+            <Text style={[styles.resultTitle, !allDead && styles.resultTitleDefeat]}>
+              {allDead ? 'VICTORY!' : 'DEFEAT'}
+            </Text>
+            {finishing || !finishResult ? (
+              <ActivityIndicator color="#F59E0B" style={{ marginVertical: 12 }} />
+            ) : (
+              <View style={styles.resultBody}>
+                <Text style={styles.rewardLine}>
+                  +{finishResult.xp_reward} XP  •  +{finishResult.gold_reward} Gold
+                </Text>
+                {finishResult.premium_bonus && (
+                  <Text style={styles.premBonusTxt}>★ Premium User +50% Bonus Active!</Text>
+                )}
+                <Text style={styles.rewardSub}>
+                  Current: Lv.{finishResult.level} | Total Gold: {finishResult.gold}
+                </Text>
+                {finishResult.level_up && (
+                  <Text style={styles.levelUp}>LEVEL UP! (+1 Attribute Point)</Text>
+                )}
+              </View>
+            )}
+            <Pressable style={styles.doneBtn} onPress={handleExit}>
+              <Text style={styles.doneBtnText}>Back to Missions</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#060B14',
-    padding: 8,
+    backgroundColor: '#000000',
+    position: 'relative',
+    overflow: 'hidden',
   },
-  hud: {
+  fullStage: {
+    ...StyleSheet.absoluteFill,
+  },
+
+  /* ── TOP OVERLAY (Mission | Golden ATB Rail | Speed & Auto) ── */
+  topOverlay: {
+    position: 'absolute',
+    top: 8,
+    left: 12,
+    right: 12,
     flexDirection: 'row',
-    alignItems: 'stretch',
-    gap: 8,
-    marginBottom: 6,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    zIndex: 20,
   },
-  hudCard: {
-    flex: 1,
-    backgroundColor: '#0F172A',
+  missionChip: {
+    backgroundColor: 'rgba(7, 11, 20, 0.78)',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1E293B',
-    padding: 7,
-    justifyContent: 'center',
-  },
-  hudName: {
-    color: '#F8FAFC',
-    fontSize: 12,
-    fontWeight: '800',
-    marginBottom: 3,
-  },
-  barBg: {
-    height: 7,
-    backgroundColor: '#1E293B',
-    borderRadius: 4,
-    overflow: 'hidden',
-  },
-  barBgSmall: {
-    height: 5,
-    backgroundColor: '#1E293B',
-    borderRadius: 3,
-    overflow: 'hidden',
-    marginTop: 2,
-  },
-  barHp: {
-    height: '100%',
-    backgroundColor: '#22C55E',
-  },
-  barCp: {
-    height: '100%',
-    backgroundColor: '#38BDF8',
-  },
-  barLabel: {
-    color: '#94A3B8',
-    fontSize: 10,
-    marginTop: 1,
-    marginBottom: 2,
-  },
-  turnBox: {
-    width: 155,
-    alignItems: 'center',
-    justifyContent: 'center',
+    borderColor: 'rgba(200, 162, 74, 0.55)',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    maxWidth: 165,
   },
   missionTitle: {
-    color: '#CBD5E1',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  turnBadge: {
-    marginTop: 4,
-    backgroundColor: '#EA580C',
-    color: '#FFF',
+    color: '#F8FAFC',
     fontSize: 10,
     fontWeight: '800',
-    paddingHorizontal: 8,
+  },
+  missionSubRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 1,
+  },
+  roundBadge: {
+    color: '#FACC15',
+    fontSize: 8.5,
+    fontWeight: '900',
+  },
+  turnStateText: {
+    color: '#94A3B8',
+    fontSize: 8.5,
+    fontWeight: '800',
+  },
+  turnStatePlayer: {
+    color: '#4ADE80',
+  },
+
+  /* Ninja Horizon Top-Center ATB Bar */
+  atbRailOuter: {
+    flex: 1,
+    maxWidth: 520,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(7, 11, 20, 0.84)',
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: '#C8A24A',
+    paddingHorizontal: 4,
+    paddingVertical: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.7,
+    shadowRadius: 5,
+    elevation: 6,
+  },
+  atbStartCap: {
+    backgroundColor: '#1E293B',
+    borderRadius: 10,
+    paddingHorizontal: 6,
     paddingVertical: 3,
-    borderRadius: 6,
-    overflow: 'hidden',
-    textAlign: 'center',
+    borderWidth: 1,
+    borderColor: '#475569',
+    marginRight: 4,
   },
-  enemiesHud: {
-    flex: 1.2,
-    gap: 3,
+  atbCapText: {
+    color: '#CBD5E1',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  atbTrack: {
+    flex: 1,
+    height: 14,
+    backgroundColor: '#0B1220',
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: '#334155',
+    position: 'relative',
     justifyContent: 'center',
+    overflow: 'visible',
   },
-  enemyMiniCard: {
-    backgroundColor: '#0F172A',
+  atbRailGlow: {
+    position: 'absolute',
+    left: 2,
+    right: 2,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: 'rgba(200, 162, 74, 0.35)',
+  },
+  atbTick: {
+    position: 'absolute',
+    top: 1,
+    bottom: 1,
+    width: 1,
+    backgroundColor: 'rgba(148, 163, 184, 0.35)',
+  },
+  atbActCap: {
+    backgroundColor: '#B45309',
+    borderRadius: 10,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: '#FDE047',
+    marginLeft: 4,
+  },
+  atbActText: {
+    color: '#FEF9C3',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+  },
+
+  topRightControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  ctrlPill: {
+    backgroundColor: 'rgba(7, 11, 20, 0.82)',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1.25,
+    borderColor: 'rgba(200, 162, 74, 0.6)',
+  },
+  ctrlPillActive: {
+    backgroundColor: '#0369A1',
+    borderColor: '#38BDF8',
+  },
+  ctrlAutoActive: {
+    backgroundColor: '#B45309',
+    borderColor: '#FACC15',
+  },
+  ctrlPillText: {
+    color: '#E2E8F0',
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  ctrlPillTextActive: {
+    color: '#FFFFFF',
+  },
+
+  /* ── IDENTICAL-SIZE PIXEL-ALIGNED HP & CP PLATES (PLAYER & ENEMY) ── */
+  unitPlatesLayer: {
+    ...StyleSheet.absoluteFill,
+    zIndex: 12,
+  },
+  unitPlate: {
+    position: 'absolute',
+    width: UNIT_PLATE_W,
+    backgroundColor: 'rgba(7, 11, 20, 0.8)',
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#1E293B',
-    paddingHorizontal: 7,
-    paddingVertical: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 3,
+    gap: 1.5,
   },
-  enemyMiniSelected: {
-    borderColor: '#F59E0B',
-    backgroundColor: '#1E293B',
+  playerPlateBorder: {
+    borderColor: 'rgba(56, 189, 248, 0.75)',
   },
-  enemyMiniDead: {
-    opacity: 0.45,
+  enemyPlateBorder: {
+    borderColor: 'rgba(248, 113, 113, 0.6)',
   },
-  enemyRowTop: {
+  enemyPlateSelected: {
+    borderColor: '#FACC15',
+    borderWidth: 1.5,
+    backgroundColor: 'rgba(24, 24, 38, 0.9)',
+    shadowColor: '#F59E0B',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.85,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  enemyPlateDead: {
+    opacity: 0.35,
+  },
+  targetPin: {
+    position: 'absolute',
+    top: -11,
+    right: -4,
+    backgroundColor: '#D97706',
+    borderRadius: 8,
+    paddingHorizontal: 3.5,
+    paddingVertical: 0.5,
+    borderWidth: 0.75,
+    borderColor: '#FEF08A',
+  },
+  targetPinText: {
+    color: '#FFF',
+    fontSize: 7.5,
+    fontWeight: '900',
+  },
+  plateNameRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
-  enemyMiniName: {
+  plateName: {
     color: '#F8FAFC',
-    fontSize: 11,
-    fontWeight: '700',
+    fontSize: 8.5,
+    fontWeight: '800',
     flex: 1,
   },
-  enemyMiniHp: {
-    color: '#94A3B8',
-    fontSize: 10,
-    fontWeight: '700',
-    marginLeft: 6,
+  plateLv: {
+    color: '#FACC15',
+    fontSize: 7.5,
+    fontWeight: '900',
+    marginLeft: 3,
   },
-  arenaWrap: {
-    flex: 1,
-    backgroundColor: '#0B1324',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#1E293B',
+  unitBarBg: {
+    height: 9.5,
+    backgroundColor: '#1E293B',
+    borderRadius: 3.5,
     overflow: 'hidden',
+    justifyContent: 'center',
     position: 'relative',
   },
-  leftFloatZone: {
+  unitHpFill: {
     position: 'absolute',
-    left: '14%',
-    top: '22%',
-    alignItems: 'center',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: '#22C55E',
   },
-  rightFloatZone: {
+  unitEnemyHpFill: {
     position: 'absolute',
-    right: '14%',
-    top: '22%',
-    alignItems: 'center',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: '#EF4444',
   },
-  floatText: {
-    fontSize: 22,
+  unitCpFill: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: '#0EA5E9',
+  },
+  unitBarText: {
+    color: '#FFFFFF',
+    fontSize: 7,
     fontWeight: '900',
-    color: '#EF4444',
+    textAlign: 'center',
     textShadowColor: '#000',
-    textShadowOffset: { width: 1, height: 1 },
-    textShadowRadius: 3,
-  },
-  floatCrit: {
-    color: '#FACC15',
-    fontSize: 25,
-  },
-  floatCp: {
-    color: '#38BDF8',
-  },
-  floatDodge: {
-    color: '#A3E635',
-  },
-  floatBuff: {
-    color: '#FB923C',
-    fontSize: 16,
-    fontWeight: '900',
-  },
-  floatDebuff: {
-    color: '#E879F9',
-    fontSize: 16,
-    fontWeight: '900',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   statusRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 3,
-    marginTop: 3,
+    gap: 2,
+    marginTop: 1,
   },
   statusPill: {
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: 4,
+    paddingHorizontal: 3.5,
+    paddingVertical: 0.5,
+    borderRadius: 3.5,
     borderWidth: 0.75,
   },
   statusPillBuff: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    backgroundColor: 'rgba(16, 185, 129, 0.25)',
     borderColor: '#34D399',
   },
   statusPillDebuff: {
-    backgroundColor: 'rgba(239, 68, 68, 0.22)',
+    backgroundColor: 'rgba(239, 68, 68, 0.28)',
     borderColor: '#F87171',
   },
   statusText: {
     color: '#F8FAFC',
-    fontSize: 8,
+    fontSize: 7,
     fontWeight: '800',
   },
-  floatHeal: {
-    color: '#4ADE80',
-    fontSize: 22,
-    fontWeight: '900',
-  },
-  logStrip: {
+
+  /* ── FLOATING COMBAT POPUPS ── */
+  leftFloatZone: {
     position: 'absolute',
-    bottom: 0,
+    left: '18%',
+    top: '32%',
+    alignItems: 'center',
+    zIndex: 18,
+  },
+  rightFloatZone: {
+    position: 'absolute',
+    right: '18%',
+    top: '32%',
+    alignItems: 'center',
+    zIndex: 18,
+  },
+
+  /* ── LOG TOAST & FLOATING ACTION DOCK ── */
+  logToastWrap: {
+    position: 'absolute',
+    bottom: 74,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(2, 6, 23, 0.72)',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 3,
+    maxWidth: '72%',
+    zIndex: 16,
+  },
+  logToastText: {
+    color: '#E2E8F0',
+    fontSize: 10,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  bottomDockWrap: {
+    position: 'absolute',
+    bottom: 6,
     left: 0,
     right: 0,
-    backgroundColor: 'rgba(2, 6, 23, 0.78)',
-    paddingHorizontal: 10,
+    alignItems: 'center',
+    zIndex: 22,
+  },
+  bottomDock: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(7, 11, 20, 0.82)',
+    borderRadius: 14,
+    borderWidth: 1.25,
+    borderColor: 'rgba(200, 162, 74, 0.65)',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.75,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  dockDivider: {
+    width: 1,
+    height: 38,
+    backgroundColor: 'rgba(200, 162, 74, 0.35)',
+    marginHorizontal: 1,
+  },
+
+  /* ── TOOLTIPS, ITEMS, MODALS ── */
+  tooltipOverlay: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(2, 6, 23, 0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 35,
+  },
+  tooltipCard: {
+    width: 300,
+    backgroundColor: '#0F172A',
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#F59E0B',
+    padding: 12,
+    gap: 5,
+  },
+  tooltipHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  tooltipTitle: {
+    color: '#F8FAFC',
+    fontSize: 14,
+    fontWeight: '900',
+    flex: 1,
+  },
+  tooltipElem: {
+    color: '#FACC15',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  tooltipStats: {
+    color: '#38BDF8',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  tooltipDesc: {
+    color: '#CBD5E1',
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  inspectSkillIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#C8A24A',
+    backgroundColor: '#060B14',
+  },
+  inspectCard: {
+    width: 390,
+    maxWidth: '90%',
+    backgroundColor: 'rgba(10, 15, 28, 0.96)',
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: '#C8A24A',
+    padding: 12,
+    gap: 8,
+  },
+  inspectHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  inspectTitleWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flex: 1,
+  },
+  inspectSideTag: {
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 1.5,
+  },
+  inspectTagPlayer: {
+    backgroundColor: '#0369A1',
+  },
+  inspectTagEnemy: {
+    backgroundColor: '#B91C1C',
+  },
+  inspectSideText: {
+    color: '#FFF',
+    fontSize: 8.5,
+    fontWeight: '900',
+  },
+  inspectName: {
+    color: '#F8FAFC',
+    fontSize: 14,
+    fontWeight: '900',
+    flexShrink: 1,
+  },
+  inspectLv: {
+    color: '#FACC15',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  inspectCloseBtn: {
+    backgroundColor: '#1E293B',
+    borderRadius: 6,
+    paddingHorizontal: 8,
     paddingVertical: 4,
   },
-  logText: {
-    color: '#E2E8F0',
-    fontSize: 11,
+  inspectCloseTxt: {
+    color: '#CBD5E1',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  inspectBarsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  inspectBarWrap: {
+    flex: 1,
+    height: 14,
+    backgroundColor: '#1E293B',
+    borderRadius: 4,
+    overflow: 'hidden',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  inspectBarTxt: {
+    color: '#FFF',
+    fontSize: 9,
+    fontWeight: '900',
     textAlign: 'center',
+    textShadowColor: '#000',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  inspectStatsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  inspectStatBox: {
+    width: '23.5%',
+    backgroundColor: '#0F172A',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+  },
+  inspectStatLabel: {
+    color: '#94A3B8',
+    fontSize: 8,
+    fontWeight: '700',
+  },
+  inspectStatVal: {
+    color: '#F8FAFC',
+    fontSize: 11,
+    fontWeight: '900',
+    marginTop: 1,
+  },
+  inspectStatusSection: {
+    backgroundColor: '#0F172A',
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    padding: 7,
+    gap: 4,
+  },
+  inspectSectionTitle: {
+    color: '#FACC15',
+    fontSize: 8.5,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  inspectEmptyText: {
+    color: '#64748B',
+    fontSize: 10,
+    fontStyle: 'italic',
+  },
+  inspectStatusList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  inspectStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderRadius: 5,
+    borderWidth: 1,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+  },
+  inspectRowBuff: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    borderColor: '#34D399',
+  },
+  inspectRowDebuff: {
+    backgroundColor: 'rgba(239, 68, 68, 0.22)',
+    borderColor: '#F87171',
+  },
+  inspectStatusName: {
+    color: '#F8FAFC',
+    fontSize: 9.5,
+    fontWeight: '800',
+  },
+  inspectStatusTurns: {
+    color: '#FDE047',
+    fontSize: 9,
+    fontWeight: '900',
+  },
+  itemsDrawer: {
+    position: 'absolute',
+    bottom: 76,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(15, 23, 42, 0.94)',
+    borderRadius: 10,
+    borderWidth: 1.25,
+    borderColor: '#2DD4BF',
+    padding: 8,
+    zIndex: 28,
+  },
+  itemChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#1E293B',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: '#475569',
+  },
+  itemIcon: {
+    fontSize: 16,
+  },
+  itemName: {
+    color: '#F8FAFC',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  itemDesc: {
+    color: '#94A3B8',
+    fontSize: 9,
+  },
+  itemCloseBtn: {
+    backgroundColor: '#334155',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  itemCloseTxt: {
+    color: '#FFF',
+    fontSize: 12,
+    fontWeight: '900',
   },
   resultOverlay: {
     ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(2, 6, 23, 0.82)',
     alignItems: 'center',
     justifyContent: 'center',
+    zIndex: 40,
   },
   resultCard: {
     width: 320,
@@ -1036,6 +2201,9 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '900',
   },
+  resultTitleDefeat: {
+    color: '#EF4444',
+  },
   resultBody: {
     alignItems: 'center',
     marginVertical: 10,
@@ -1045,6 +2213,11 @@ const styles = StyleSheet.create({
     color: '#FACC15',
     fontSize: 15,
     fontWeight: '800',
+  },
+  premBonusTxt: {
+    color: '#FDE047',
+    fontSize: 11,
+    fontWeight: '900',
   },
   rewardSub: {
     color: '#CBD5E1',
@@ -1065,152 +2238,49 @@ const styles = StyleSheet.create({
   },
   doneBtnText: {
     color: '#FFF',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '800',
   },
-  actionBar: {
-    flexDirection: 'row',
-    gap: 6,
-    marginTop: 6,
-  },
-  actBtn: {
-    flex: 1,
-    borderRadius: 8,
-    paddingVertical: 7,
-    paddingHorizontal: 6,
+  fleeCard: {
+    width: 340,
+    backgroundColor: '#0F172A',
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: '#475569',
+    padding: 16,
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: 8,
   },
-  atkBtn: {
-    backgroundColor: '#DC2626',
+  fleeTitle: {
+    color: '#F8FAFC',
+    fontSize: 16,
+    fontWeight: '900',
   },
-  chgBtn: {
+  fleeSub: {
+    color: '#94A3B8',
+    fontSize: 11,
+    textAlign: 'center',
+  },
+  fleeBtnRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+  fleeModalBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 7,
+  },
+  fleeTryBtn: {
     backgroundColor: '#0284C7',
   },
-  skillBtn: {
-    backgroundColor: '#7C3AED',
+  fleeQuitBtn: {
+    backgroundColor: '#DC2626',
   },
-  fleeBtn: {
+  fleeCancelBtn: {
     backgroundColor: '#334155',
-    maxWidth: 68,
   },
   disabledBtn: {
     opacity: 0.4,
-  },
-  actTitle: {
-    color: '#FFF',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  actSub: {
-    color: '#E2E8F0',
-    fontSize: 9,
-    marginTop: 1,
-  },
-  timelineBarWrap: {
-    backgroundColor: '#090D16',
-    borderWidth: 1,
-    borderColor: '#1E293B',
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    marginHorizontal: 8,
-    marginTop: 4,
-  },
-  timelineHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 2,
-  },
-  timelineTitlePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-  },
-  timelineIcon: {
-    fontSize: 10,
-    color: '#38BDF8',
-  },
-  timelineTitleText: {
-    fontSize: 9,
-    fontWeight: '900',
-    color: '#94A3B8',
-    letterSpacing: 0.8,
-  },
-  timelineActionPill: {
-    backgroundColor: '#7C2D12',
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-    borderRadius: 4,
-    borderWidth: 0.5,
-    borderColor: '#F97316',
-  },
-  timelineActionText: {
-    fontSize: 8,
-    fontWeight: '900',
-    color: '#FDBA74',
-  },
-  timelineTrack: {
-    height: 18,
-    backgroundColor: '#0F172A',
-    borderRadius: 9,
-    borderWidth: 1,
-    borderColor: '#334155',
-    position: 'relative',
-    justifyContent: 'center',
-    overflow: 'hidden',
-  },
-  timelineTick: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    width: 1,
-    backgroundColor: '#334155',
-  },
-  tokenBase: {
-    position: 'absolute',
-    height: 16,
-    minWidth: 42,
-    borderRadius: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 3,
-    justifyContent: 'center',
-    borderWidth: 1,
-    zIndex: 10,
-  },
-  playerToken: {
-    backgroundColor: '#0369A1',
-    borderColor: '#38BDF8',
-  },
-  enemyToken: {
-    backgroundColor: '#991B1B',
-    borderColor: '#F87171',
-  },
-  activeTokenGlow: {
-    borderColor: '#FACC15',
-    borderWidth: 1.5,
-    backgroundColor: '#D97706',
-    shadowColor: '#F59E0B',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.9,
-    shadowRadius: 4,
-    elevation: 4,
-  },
-  tokenEmoji: {
-    fontSize: 9,
-    marginRight: 2,
-  },
-  tokenText: {
-    fontSize: 8,
-    fontWeight: '900',
-    color: '#FFFFFF',
-  },
-  tokenAgi: {
-    fontSize: 7,
-    fontWeight: '700',
-    color: '#CBD5E1',
-    marginLeft: 2,
   },
 });

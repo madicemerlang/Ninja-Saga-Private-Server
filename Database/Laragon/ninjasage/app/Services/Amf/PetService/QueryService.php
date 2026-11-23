@@ -49,7 +49,7 @@ class QueryService
                 'pet_name' => $p->name ?? ($config->name ?? 'Unknown Pet'),
                 'pet_xp' => $p->xp,
                 'pet_level' => $p->level,
-                'pet_skills' => $config ? $config->calculateSkillsString($p->level) : "1,1,1,1,1,1",
+                'pet_skills' => !empty($p->learned_skills) ? $p->learned_skills : '1,0,0,0,0,0',
                 'pet_mp' => (int) $p->maturity_points,
                 'pet_swf' => $p->pet_id // Type ID for SWF loading
             ];

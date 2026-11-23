@@ -1,4 +1,4 @@
-import type { RawSkillEffectDef, SkillDef } from '../api/gameData';
+import type { PetJsonDef, RawSkillEffectDef, SkillDef } from '../api/gameData';
 import type { CharacterPoints } from '../store/useAuthStore';
 
 export interface StatusEffect {
@@ -53,6 +53,7 @@ export type FloatKind = 'damage' | 'crit' | 'cp' | 'dodge' | 'heal' | 'buff' | '
 export interface FloatingNumber {
   id: number;
   target: 'player' | 'enemy';
+  targetSlot?: number;
   text: string;
   kind: FloatKind;
 }
@@ -64,6 +65,35 @@ export interface TurnOutcome {
   floats: FloatingNumber[];
   log: string;
   skillSwfToPlay?: string;
+  didCrit?: boolean;
+  wasDodged?: boolean;
+}
+
+export interface MultiTurnOutcome {
+  player: Combatant;
+  enemies: Combatant[];
+  cooldowns: Record<string, number>;
+  floats: FloatingNumber[];
+  log: string;
+  skillSwfToPlay?: string;
+  didCrit?: boolean;
+  wasDodged?: boolean;
+  isAoE?: boolean;
+}
+
+export interface BattleConsumable {
+  id: 'hp_scroll' | 'cp_scroll' | 'purify_pill';
+  name: string;
+  icon: string;
+  desc: string;
+  qty: number;
+}
+
+export interface SkillElementMeta {
+  label: string;
+  icon: string;
+  bg: string;
+  border: string;
 }
 
 export interface TurnStartResult {
@@ -252,7 +282,24 @@ function getEffectiveDodgeChance(attacker: Combatant, defender: Combatant): numb
   return Math.max(0, Math.min(0.85, dodge));
 }
 
-function getEffectiveCritChance(attacker: Combatant): number {
+export function getEffectiveUnitDodgeChance(unit: Combatant): number {
+  if (hasStatus(unit, 'stealth')) {
+    const stl = getStatuses(unit).find((s) => s.id === 'stealth');
+    if ((stl?.amountProtection ?? 100) >= 100) return 1.0;
+  }
+  let dodge = unit.dodgeChance ?? 0.05;
+  dodge += getStatusAmountSum(unit, 'reflexes', 'attention') / 100;
+  dodge -= getStatusAmountSum(unit, 'numb') / 100;
+  return Math.max(0, Math.min(1.0, dodge));
+}
+
+export function getEffectiveUnitAccuracyChance(unit: Combatant): number {
+  let acc = unit.accuracyChance ?? 0;
+  acc -= getStatusAmountSum(unit, 'blind', 'darkness', 'dark_curse', 'shadow', 'disorient') / 100;
+  return acc;
+}
+
+export function getEffectiveCritChance(attacker: Combatant): number {
   let crit = attacker.critChance ?? 0.05;
   crit += getStatusAmountSum(attacker, 'concentration') / 100;
   if (hasStatus(attacker, 'excitation')) {
@@ -261,7 +308,7 @@ function getEffectiveCritChance(attacker: Combatant): number {
   return Math.max(0, Math.min(0.95, crit));
 }
 
-function getOutgoingDamageMultiplier(attacker: Combatant): number {
+export function getOutgoingDamageMultiplier(attacker: Combatant): number {
   let mult = 1.0;
   for (const s of getStatuses(attacker)) {
     if (s.turns <= 0) continue;
@@ -414,7 +461,7 @@ export function advanceAgilityTimeline(
     if (p.id === winnerId) {
       nextGauges[p.id] = 100;
     } else {
-      nextGauges[p.id] = Math.min(99, Math.round(advanced));
+      nextGauges[p.id] = Math.min(99.9, Number(advanced.toFixed(2)));
     }
   }
 
@@ -1047,6 +1094,7 @@ export function executePlayerAction(
         cooldowns: nextCd,
         floats,
         log: `${nextEnemy.name} dodged ${nextPlayer.name}'s weapon attack!`,
+        wasDodged: true,
       };
     }
 
@@ -1079,6 +1127,7 @@ export function executePlayerAction(
       cooldowns: nextCd,
       floats,
       log: `${nextPlayer.name} attacked with weapon for ${finalDmg} dmg${isCrit ? ' (CRIT!)' : ''}.`,
+      didCrit: isCrit,
     };
   }
 
@@ -1248,6 +1297,7 @@ export function executePlayerAction(
     floats,
     log: `${nextPlayer.name} cast ${label}${dmgText}${effText}.`,
     skillSwfToPlay,
+    didCrit: isCrit,
   };
 }
 
@@ -1399,5 +1449,396 @@ export function executeEnemyTurn(
     cooldowns: nextCd,
     floats,
     log: `${nextEnemy.name} struck ${nextPlayer.name}${dmgText}${effText}.`,
+    didCrit: isCrit,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ninja Horizon Extensions: Element Meta, AoE Skills, Auto-Battle, Consumables, Pet & Flee
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function getSkillElementMeta(type?: string): SkillElementMeta {
+  switch (String(type ?? '')) {
+    case '1':
+      return { label: 'Wind', icon: '🌪️', bg: '#15803D', border: '#4ADE80' };
+    case '2':
+      return { label: 'Fire', icon: '🔥', bg: '#B91C1C', border: '#F87171' };
+    case '3':
+      return { label: 'Lightning', icon: '⚡', bg: '#A16207', border: '#FACC15' };
+    case '4':
+      return { label: 'Earth', icon: '🪨', bg: '#78350F', border: '#D97706' };
+    case '5':
+      return { label: 'Water', icon: '💧', bg: '#1D4ED8', border: '#60A5FA' };
+    case '6':
+      return { label: 'Taijutsu', icon: '👊', bg: '#9A3412', border: '#FB923C' };
+    case '7':
+      return { label: 'Genjutsu', icon: '👁️', bg: '#6D28D9', border: '#C084FC' };
+    default:
+      return { label: 'Jutsu', icon: '✦', bg: '#5B21B6', border: '#A78BFA' };
+  }
+}
+
+export function isSkillAoE(skill: SkillDef): boolean {
+  if (String(skill.target ?? '').toLowerCase() === 'all') return true;
+  if (skill.description && /all enemies|all targets|every enemy/i.test(skill.description)) {
+    return true;
+  }
+  return false;
+}
+
+export function executePlayerActionMulti(
+  player: Combatant,
+  enemies: Combatant[],
+  targetIdx: number,
+  cooldowns: Record<string, number>,
+  action: { type: 'attack' } | { type: 'charge' } | { type: 'skill'; skill: SkillDef },
+  skillEffects?: RawSkillEffectDef[]
+): MultiTurnOutcome {
+  // Single-target path (attack, charge, or single/self skill)
+  if (action.type !== 'skill' || !isSkillAoE(action.skill)) {
+    const safeIdx =
+      enemies[targetIdx] && enemies[targetIdx].hp > 0
+        ? targetIdx
+        : Math.max(0, enemies.findIndex((e) => e.hp > 0));
+    const targetEnemy = enemies[safeIdx];
+    const single = executePlayerAction(player, targetEnemy, cooldowns, action, skillEffects);
+    const taggedFloats = single.floats.map((f) =>
+      f.target === 'enemy' ? { ...f, targetSlot: safeIdx } : f
+    );
+    return {
+      player: single.player,
+      enemies: enemies.map((e, i) => (i === safeIdx ? single.enemy : e)),
+      cooldowns: single.cooldowns,
+      floats: taggedFloats,
+      log: single.log,
+      skillSwfToPlay: single.skillSwfToPlay,
+      didCrit: single.didCrit,
+      wasDodged: single.wasDodged,
+      isAoE: false,
+    };
+  }
+
+  // AoE Skill Path (TARGET_ENEMY_ALL — hits all alive enemies!)
+  const sk = action.skill;
+  const cost = getEffectiveSkillCpCost(player, sk.cp_cost || 0);
+  if (player.cp < cost) {
+    return {
+      player: { ...player },
+      enemies: enemies.map((e) => ({ ...e })),
+      cooldowns,
+      floats: [],
+      log: `Not enough CP for ${sk.name}!`,
+      isAoE: true,
+    };
+  }
+
+  const aliveIndices = enemies
+    .map((e, i) => (e.hp > 0 ? i : -1))
+    .filter((i) => i !== -1);
+
+  if (aliveIndices.length === 0) {
+    return {
+      player: { ...player },
+      enemies: enemies.map((e) => ({ ...e })),
+      cooldowns,
+      floats: [],
+      log: `No enemies remaining!`,
+      isAoE: true,
+    };
+  }
+
+  let curPlayer: Combatant = { ...player, statuses: [...getStatuses(player)] };
+  const nextEnemies = enemies.map((e) => ({ ...e, statuses: [...getStatuses(e)] }));
+  const allFloats: FloatingNumber[] = [];
+  let anyCrit = false;
+  let totalHits = 0;
+  let totalDmg = 0;
+
+  // Run primary hit on first alive enemy (spends CP, ticks cooldowns & self-statuses once)
+  const firstIdx = aliveIndices[0];
+  const primaryOut = executePlayerAction(curPlayer, nextEnemies[firstIdx], cooldowns, action, skillEffects);
+  curPlayer = primaryOut.player;
+  nextEnemies[firstIdx] = primaryOut.enemy;
+  const finalCd = primaryOut.cooldowns;
+  if (primaryOut.didCrit) anyCrit = true;
+  if (!primaryOut.wasDodged) totalHits++;
+  for (const f of primaryOut.floats) {
+    if (f.target === 'enemy') {
+      allFloats.push({ ...f, targetSlot: firstIdx });
+      const m = f.text.match(/-(\d+)/);
+      if (m) totalDmg += Number(m[1]);
+    } else {
+      allFloats.push(f);
+    }
+  }
+
+  // Apply AoE strike to remaining alive enemies (without re-spending CP or re-ticking cooldowns)
+  const p = curPlayer.points ?? { wind: 0, fire: 0, lightning: 0, water: 0, earth: 0, free: 0 };
+  const fireAllDmgMult = 1.0 + (p.fire || 0) * 0.004;
+  const critMultiplier = 1.50 + (p.lightning || 0) * 0.008;
+  const outDmgMult = getOutgoingDamageMultiplier(curPlayer);
+  const enemyEffects = (skillEffects ?? []).filter((e) => e.target !== 'self');
+  const dummySelf = new Set<string>();
+
+  for (let k = 1; k < aliveIndices.length; k++) {
+    const idx = aliveIndices[k];
+    const target = nextEnemies[idx];
+    const dodge = getEffectiveDodgeChance(curPlayer, target);
+    if (Math.random() < dodge) {
+      allFloats.push({ id: floatSeq++, target: 'enemy', targetSlot: idx, text: 'DODGE!', kind: 'dodge' });
+      continue;
+    }
+    totalHits++;
+    if ((sk.damage ?? 0) > 0 || enemyEffects.length === 0) {
+      const skBase = (sk.damage ?? 0) > 0 ? sk.damage : 20;
+      const variance = 0.80 + Math.random() * 0.40;
+      let matchingElemMult = 1.0;
+      const skType = String(sk.type ?? '');
+      if (skType === '1') matchingElemMult += (p.wind || 0) * 0.01;
+      else if (skType === '2') matchingElemMult += (p.fire || 0) * 0.01;
+      else if (skType === '3') matchingElemMult += (p.lightning || 0) * 0.01;
+      else if (skType === '4') matchingElemMult += (p.earth || 0) * 0.01;
+      else if (skType === '5') matchingElemMult += (p.water || 0) * 0.01;
+
+      const isCrit = Math.random() < getEffectiveCritChance(curPlayer);
+      if (isCrit) anyCrit = true;
+      const critBonus = isCrit ? critMultiplier : 1.0;
+      const preDef = Math.max(
+        1,
+        Math.round(skBase * variance * matchingElemMult * fireAllDmgMult * outDmgMult * critBonus)
+      );
+      const subFloats: FloatingNumber[] = [];
+      const dmg = applyIncomingDamageModifiers(preDef, target, 'enemy', subFloats);
+      target.hp = Math.max(0, target.hp - dmg);
+      totalDmg += dmg;
+      subFloats.push({
+        id: floatSeq++,
+        target: 'enemy',
+        text: isCrit ? `CRIT -${dmg}!` : `-${dmg}`,
+        kind: isCrit ? 'crit' : 'damage',
+      });
+      applyOnHitReactions(dmg, curPlayer, target, 'player', 'enemy', subFloats);
+      for (const f of subFloats) {
+        allFloats.push(f.target === 'enemy' ? { ...f, targetSlot: idx } : f);
+      }
+    }
+    if (enemyEffects.length > 0) {
+      const effFloats: FloatingNumber[] = [];
+      applySkillEffects(enemyEffects, curPlayer, target, 'player', 'enemy', finalCd, effFloats, dummySelf);
+      for (const f of effFloats) {
+        allFloats.push(f.target === 'enemy' ? { ...f, targetSlot: idx } : f);
+      }
+    }
+  }
+
+  return {
+    player: curPlayer,
+    enemies: nextEnemies,
+    cooldowns: finalCd,
+    floats: allFloats,
+    log: `${curPlayer.name} cast AoE ${sk.name} hitting ${totalHits}/${aliveIndices.length} enemies (${totalDmg} total dmg)!`,
+    skillSwfToPlay: `${sk.id}.swf`,
+    didCrit: anyCrit,
+    isAoE: true,
+  };
+}
+
+export function chooseAutoBattleAction(
+  player: Combatant,
+  enemies: Combatant[],
+  skills: SkillDef[],
+  cooldowns: Record<string, number>,
+  skillEffectsById: Record<string, RawSkillEffectDef[]>
+): { type: 'attack' } | { type: 'charge' } | { type: 'skill'; skill: SkillDef } {
+  const sealed = isSkillsRestricted(player);
+  const chargeLocked = isChargeDisabled(player);
+  const aliveCount = enemies.filter((e) => e.hp > 0).length;
+
+  const readySkills = sealed
+    ? []
+    : skills.filter((sk) => {
+        const cd = cooldowns[sk.id] ?? 0;
+        const cost = getEffectiveSkillCpCost(player, sk.cp_cost || 0);
+        return cd <= 0 && player.cp >= cost;
+      });
+
+  // 1) Low HP? Prioritize a healing skill if available and not blocked by Internal Injury
+  if (player.hp / Math.max(1, player.maxHp) < 0.5 && !hasStatus(player, 'internal_injury')) {
+    const healSkill = readySkills.find((sk) => {
+      const effs = skillEffectsById[sk.id] ?? [];
+      return (
+        effs.some((e) => e.effect === 'heal' || e.effect === 'regenHP' || e.effect === 'regeneration') ||
+        /heal|recover/i.test(sk.name + ' ' + sk.description)
+      );
+    });
+    if (healSkill) return { type: 'skill', skill: healSkill };
+  }
+
+  // 2) Low CP (< 25%) and no affordable ready skill -> Charge (Ninja Horizon Normal Auto rule)
+  if (!chargeLocked && player.cp < player.maxCp * 0.25 && readySkills.length === 0) {
+    return { type: 'charge' };
+  }
+
+  // 3) Pick best ready offensive skill (prefer AoE when 2+ enemies alive, else highest damage)
+  if (readySkills.length > 0) {
+    const scored = [...readySkills].sort((a, b) => {
+      const aAoE = aliveCount >= 2 && isSkillAoE(a) ? 1.65 : 1.0;
+      const bAoE = aliveCount >= 2 && isSkillAoE(b) ? 1.65 : 1.0;
+      const aScore = (a.damage || 30) * aAoE;
+      const bScore = (b.damage || 30) * bAoE;
+      return bScore - aScore;
+    });
+    return { type: 'skill', skill: scored[0] };
+  }
+
+  // 4) Fallback to Weapon Attack (also restores +5% CP)
+  return { type: 'attack' };
+}
+
+export function executeConsumableAction(
+  player: Combatant,
+  cooldowns: Record<string, number>,
+  itemId: BattleConsumable['id']
+): {
+  player: Combatant;
+  cooldowns: Record<string, number>;
+  floats: FloatingNumber[];
+  log: string;
+} {
+  const nextPlayer: Combatant = { ...player, statuses: [...getStatuses(player)] };
+  const nextCd = tickCooldowns(cooldowns);
+  const floats: FloatingNumber[] = [];
+  let log = '';
+
+  if (itemId === 'hp_scroll') {
+    if (hasStatus(nextPlayer, 'internal_injury')) {
+      floats.push({ id: floatSeq++, target: 'player', text: 'HEAL BLOCKED!', kind: 'debuff' });
+      log = `${nextPlayer.name} used Healing Scroll, but Internal Injury blocked healing!`;
+    } else {
+      const heal = Math.max(40, Math.round(nextPlayer.maxHp * 0.35));
+      nextPlayer.hp = Math.min(nextPlayer.maxHp, nextPlayer.hp + heal);
+      floats.push({ id: floatSeq++, target: 'player', text: `+${heal} HP`, kind: 'heal' });
+      log = `${nextPlayer.name} used Healing Scroll (+${heal} HP).`;
+    }
+  } else if (itemId === 'cp_scroll') {
+    const gain = Math.max(40, Math.round(nextPlayer.maxCp * 0.35));
+    nextPlayer.cp = Math.min(nextPlayer.maxCp, nextPlayer.cp + gain);
+    floats.push({ id: floatSeq++, target: 'player', text: `+${gain} CP`, kind: 'cp' });
+    log = `${nextPlayer.name} used Chakra Scroll (+${gain} CP).`;
+  } else {
+    nextPlayer.statuses = nextPlayer.statuses.filter((s) => s.type !== 'Debuff');
+    floats.push({ id: floatSeq++, target: 'player', text: 'PURIFY!', kind: 'buff' });
+    log = `${nextPlayer.name} used Antidote Pill and cleared all debuffs!`;
+  }
+
+  tickDownStatuses(nextPlayer);
+  return { player: nextPlayer, cooldowns: nextCd, floats, log };
+}
+
+export function buildPetCombatant(pet: PetJsonDef, ownerLevel: number): Combatant {
+  const lvl = Math.max(1, pet.level || ownerLevel);
+  return {
+    id: 'pet',
+    name: pet.name || 'Ninja Pet',
+    level: lvl,
+    hp: 9999,
+    maxHp: 9999,
+    cp: 9999,
+    maxCp: 9999,
+    agility: Math.max(6, pet.agility || Math.round(8 + lvl * 0.9)),
+    baseDamage: Math.max(10, Math.round(10 + lvl * 3.2)),
+    critChance: Math.max(0.05, Math.min(0.5, (pet.critical ?? 5) / 100)),
+    dodgeChance: Math.max(0.05, Math.min(0.5, (pet.dodge ?? 5) / 100)),
+    attackCooldowns: {},
+    statuses: [],
+  };
+}
+
+export function executePetTurn(
+  pet: Combatant,
+  targetEnemy: Combatant,
+  targetSlot: number,
+  petDef?: PetJsonDef
+): {
+  pet: Combatant;
+  enemy: Combatant;
+  floats: FloatingNumber[];
+  log: string;
+  didCrit: boolean;
+} {
+  const nextEnemy: Combatant = { ...targetEnemy, statuses: [...getStatuses(targetEnemy)] };
+  const tickedCds: Record<number, number> = {};
+  for (const [k, v] of Object.entries(pet.attackCooldowns ?? {})) {
+    if (v > 1) tickedCds[Number(k)] = v - 1;
+  }
+
+  const unlockedAtks = (petDef?.attacks ?? [])
+    .map((a, idx) => ({ ...a, idx }))
+    .filter((a) => (a.level ?? 1) <= pet.level);
+  const readyAtks = unlockedAtks.filter((a) => !((pet.attackCooldowns?.[a.idx] ?? 0) > 0));
+  const chosen = readyAtks.length > 0 ? readyAtks[readyAtks.length - 1] : unlockedAtks[0];
+
+  if (chosen && (chosen.cooldown ?? 0) > 0) {
+    tickedCds[chosen.idx] = chosen.cooldown;
+  }
+
+  const nextPet: Combatant = { ...pet, attackCooldowns: tickedCds };
+  const floats: FloatingNumber[] = [];
+
+  const enemyDodge = getEffectiveDodgeChance(nextPet, nextEnemy);
+  if (Math.random() < enemyDodge) {
+    floats.push({ id: floatSeq++, target: 'enemy', targetSlot, text: 'DODGE!', kind: 'dodge' });
+    return {
+      pet: nextPet,
+      enemy: nextEnemy,
+      floats,
+      log: `${nextEnemy.name} dodged ${nextPet.name}'s ${chosen?.name || 'attack'}!`,
+      didCrit: false,
+    };
+  }
+
+  const base = chosen?.dmg && chosen.dmg > 10 ? chosen.dmg : nextPet.baseDamage * (chosen?.dmg || 1);
+  const variance = 0.85 + Math.random() * 0.30;
+  const isCrit = Math.random() < getEffectiveCritChance(nextPet);
+  const rawDmg = Math.max(1, Math.round(base * variance * (isCrit ? 1.5 : 1.0)));
+  const finalDmg = applyIncomingDamageModifiers(rawDmg, nextEnemy, 'enemy', floats);
+  nextEnemy.hp = Math.max(0, nextEnemy.hp - finalDmg);
+  floats.push({
+    id: floatSeq++,
+    target: 'enemy',
+    targetSlot,
+    text: isCrit ? `🐾 CRIT -${finalDmg}!` : `🐾 -${finalDmg}`,
+    kind: isCrit ? 'crit' : 'damage',
+  });
+
+  return {
+    pet: nextPet,
+    enemy: nextEnemy,
+    floats,
+    log: `🐾 ${nextPet.name} used ${chosen?.name || 'Claw Strike'} on ${nextEnemy.name} for ${finalDmg} dmg${isCrit ? ' (CRIT!)' : ''}!`,
+    didCrit: isCrit,
+  };
+}
+
+export function attemptFlee(
+  player: Combatant,
+  enemies: Combatant[]
+): { escaped: boolean; chancePct: number; log: string } {
+  const alive = enemies.filter((e) => e.hp > 0);
+  const avgEnemyAgi =
+    alive.length > 0
+      ? alive.reduce((acc, e) => acc + getEffectiveAgility(e), 0) / alive.length
+      : 10;
+  const pAgi = getEffectiveAgility(player);
+  const ratio = pAgi / Math.max(1, avgEnemyAgi);
+  const chance = Math.max(0.45, Math.min(0.92, 0.55 + (ratio - 1) * 0.25));
+  const chancePct = Math.round(chance * 100);
+  const escaped = Math.random() < chance;
+  return {
+    escaped,
+    chancePct,
+    log: escaped
+      ? `${player.name} threw a smoke bomb and escaped! (${chancePct}%)`
+      : `Escape failed (${chancePct}% chance)! Enemies block your retreat!`,
   };
 }

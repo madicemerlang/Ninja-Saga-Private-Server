@@ -17,6 +17,7 @@ export type StageEvent =
   | { type: 'STAGE_CLEARED' }
   | { type: 'ANIM_HIT' }
   | { type: 'ANIM_DONE' }
+  | { type: 'SKILL_ICONS'; icons: Record<string, string> }
   | { type: 'HOLD_STATE'; held: boolean }
   | { type: 'MEMORY_REPORT'; wasmHeapMB: number; memoryCount: number }
   | { type: 'STAGE_ERROR'; message: string };
@@ -25,6 +26,8 @@ export interface RuffleStageHandle {
   loadSwf: (url: string) => void;
   playSequence: (seq: string) => void;
   preloadSwfs: (urls: string[]) => void;
+  captureSkillIcons: (url: string, skillIds: string[]) => void;
+  setSpeed: (speed: 1 | 2) => void;
   setHoldFrames: (held: boolean) => void;
   pumpFrame: () => void;
   requestMemoryReport: () => void;
@@ -64,6 +67,9 @@ export const RuffleStageView = forwardRef<RuffleStageHandle, RuffleStageViewProp
       loadSwf: (url: string) => sendCommand({ type: 'LOAD_SWF', url }),
       playSequence: (seq: string) => sendCommand({ type: 'PLAY_SEQ', seq }),
       preloadSwfs: (urls: string[]) => sendCommand({ type: 'PRELOAD_SWFS', urls }),
+      captureSkillIcons: (url: string, skillIds: string[]) =>
+        sendCommand({ type: 'CAPTURE_SKILL_ICONS', url, skillIds }),
+      setSpeed: (speed: 1 | 2) => sendCommand({ type: 'SET_SPEED', speed }),
       setHoldFrames: (held: boolean) => sendCommand({ type: 'HOLD_FRAMES', held }),
       pumpFrame: () => sendCommand({ type: 'PUMP_FRAME' }),
       requestMemoryReport: () => sendCommand({ type: 'GET_MEMORY' }),

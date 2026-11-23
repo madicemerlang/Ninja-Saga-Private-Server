@@ -105,4 +105,94 @@ class ManagementService
 
         return ['status' => 1];
     }
+
+    /**
+     * learnPetSkill
+     * Params: [char_id, session_key, pet_instance_id, skill_index]
+     */
+    public function learnPetSkill($params)
+    {
+        $guard = $this->guardCharacterSessionFromParams($params);
+        if ($guard) {
+            return $guard;
+        }
+
+        $charId = (int) ($params[0] ?? 0);
+        $petInstanceId = (int) ($params[2] ?? 0);
+        $skillIndex = (int) ($params[3] ?? -1);
+
+        if ($skillIndex < 0 || $skillIndex > 5) {
+            return ['status' => 0, 'error' => 'Invalid pet skill slot.'];
+        }
+
+        $char = Character::find($charId);
+        if (!$char) {
+            return ['status' => 0, 'error' => 'Character not found.'];
+        }
+
+        $pet = CharacterPet::where('character_id', $charId)->where('id', $petInstanceId)->first();
+        if (!$pet) {
+            return ['status' => 0, 'error' => 'Pet not found.'];
+        }
+
+        $bits = array_pad(
+            array_map('intval', explode(',', !empty($pet->learned_skills) ? $pet->learned_skills : '1,0,0,0,0,0')),
+            6,
+            0
+        );
+
+        if ($bits[$skillIndex] === 1) {
+            return ['status' => 2, 'result' => 'Jurus pet ini sudah dipelajari.'];
+        }
+
+        // Resolve required level from pets.json (fallback: 1, 5, 10, 15, 20, 25)
+        $fallbackLevels = [1, 5, 10, 15, 20, 25];
+        $reqLevel = $fallbackLevels[$skillIndex] ?? 1;
+        $skillName = 'Skill #' . ($skillIndex + 1);
+
+        $petsJsonPath = public_path('game_data/pets.json');
+        if (is_file($petsJsonPath)) {
+            $decoded = json_decode((string) file_get_contents($petsJsonPath), true);
+            if (is_array($decoded)) {
+                foreach ($decoded as $entry) {
+                    if (($entry['id'] ?? '') === $pet->pet_id && !empty($entry['attacks'][$skillIndex])) {
+                        $atk = $entry['attacks'][$skillIndex];
+                        $reqLevel = max(1, (int) ($atk['level'] ?? $reqLevel));
+                        $skillName = (string) ($atk['name'] ?? $skillName);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if ((int) $pet->level < $reqLevel) {
+            return [
+                'status' => 2,
+                'result' => "Pet harus mencapai Lv.{$reqLevel} untuk mempelajari {$skillName}.",
+            ];
+        }
+
+        $goldCost = max(500, $reqLevel * 500);
+        if ((int) $char->gold < $goldCost) {
+            return [
+                'status' => 2,
+                'result' => "Gold tidak cukup. Butuh " . number_format($goldCost) . " Gold.",
+            ];
+        }
+
+        $char->gold = (int) $char->gold - $goldCost;
+        $char->save();
+
+        $bits[$skillIndex] = 1;
+        $newSkillsStr = implode(',', array_slice($bits, 0, 6));
+        $pet->learned_skills = $newSkillsStr;
+        $pet->save();
+
+        return [
+            'status' => 1,
+            'result' => "Berhasil mempelajari jurus {$skillName}!",
+            'pet_skills' => $newSkillsStr,
+            'character_gold' => (int) $char->gold,
+        ];
+    }
 }

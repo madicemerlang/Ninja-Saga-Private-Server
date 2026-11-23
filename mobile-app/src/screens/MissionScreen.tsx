@@ -7,11 +7,14 @@ import {
   Text,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { playClickSfx } from '../audio/audioManager';
 import { MobileApiClient } from '../api/client';
 import { loadGameData, type MissionDef } from '../api/gameData';
+import { BUILDING_BGS } from '../components/BuildingSceneBackdrop';
+import { NinjaScrollWindow, NS_THEME } from '../components/NinjaScrollWindow';
 import { useAuthStore } from '../store/useAuthStore';
+
+const GRADE_TABS = ['ALL', 'C', 'B', 'A', 'S'] as const;
 
 export function MissionScreen() {
   const serverUrl = useAuthStore((s) => s.serverUrl);
@@ -21,6 +24,8 @@ export function MissionScreen() {
   const navigate = useAuthStore((s) => s.navigate);
 
   const [missions, setMissions] = useState<MissionDef[]>([]);
+  const [gradeTab, setGradeTab] = useState<(typeof GRADE_TABS)[number]>('ALL');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [startingId, setStartingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -31,11 +36,26 @@ export function MissionScreen() {
     loadGameData(serverUrl)
       .then((bundle) => {
         const sorted = [...bundle.missions].sort((a, b) => (a.level || 0) - (b.level || 0));
-        setMissions(sorted.slice(0, 40));
+        const sliced = sorted.slice(0, 60);
+        setMissions(sliced);
+        if (sliced.length > 0) setSelectedId(sliced[0].id);
       })
       .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
   }, [serverUrl]);
+
+  const filteredMissions = useMemo(() => {
+    if (gradeTab === 'ALL') return missions;
+    return missions.filter((m) => (m.grade || 'C').toUpperCase() === gradeTab);
+  }, [missions, gradeTab]);
+
+  const selectedMission = useMemo(
+    () =>
+      filteredMissions.find((m) => m.id === selectedId) ??
+      filteredMissions[0] ??
+      null,
+    [filteredMissions, selectedId]
+  );
 
   const handleStartMission = async (mission: MissionDef) => {
     if (!profile || !sessionKey) return;
@@ -53,95 +73,191 @@ export function MissionScreen() {
     }
   };
 
-  return (
-    <SafeAreaView style={styles.root}>
-      <View style={styles.header}>
-        <Pressable style={styles.backBtn} onPress={() => navigate('hub')}>
-          <Text style={styles.backText}>← Village Hub</Text>
-        </Pressable>
-        <Text style={styles.title}>
-          Mission Board {profile ? `(Lv.${profile.level} • Gold ${profile.gold})` : ''}
-        </Text>
-        <View style={{ width: 90 }} />
-      </View>
+  const selectedLocked = selectedMission
+    ? (profile?.level ?? 1) < (selectedMission.level || 1)
+    : false;
+  const selectedBusy = selectedMission ? startingId === selectedMission.id : false;
 
+  return (
+    <NinjaScrollWindow
+      title="Mission Room"
+      bgSource={BUILDING_BGS.missionRoom}
+      onClose={() => {
+        playClickSfx(serverUrl);
+        navigate('hub');
+      }}
+      headerCenter={
+        <View style={styles.gradeRow}>
+          {GRADE_TABS.map((g) => (
+            <Pressable
+              key={g}
+              style={[styles.gradeTab, gradeTab === g && styles.gradeTabActive]}
+              onPress={() => {
+                playClickSfx(serverUrl);
+                setGradeTab(g);
+              }}
+            >
+              <Text style={[styles.gradeTabTxt, gradeTab === g && styles.gradeTabTxtActive]}>
+                {g === 'ALL' ? 'All' : `Grade ${g}`}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      }
+    >
       {error && <Text style={styles.errorText}>{error}</Text>}
 
       {loading ? (
         <View style={styles.center}>
-          <ActivityIndicator color="#F59E0B" size="large" />
-          <Text style={styles.loadingText}>Loading mission.json...</Text>
+          <ActivityIndicator color={NS_THEME.btnOrange} size="large" />
+          <Text style={styles.loadingText}>Memuat daftar misi...</Text>
         </View>
       ) : (
-        <ScrollView contentContainerStyle={styles.grid}>
-          {missions.map((m) => {
-            const locked = (profile?.level ?? 1) < (m.level || 1);
-            const busy = startingId === m.id;
-            return (
-              <View key={m.id} style={[styles.card, locked && styles.cardLocked]}>
-                <View style={styles.cardTop}>
-                  <Text style={styles.grade}>{(m.grade || 'C').toUpperCase()}</Text>
-                  <Text style={styles.reqLvl}>Lv.{m.level}</Text>
-                </View>
-                <Text style={styles.mName} numberOfLines={1}>
-                  {m.name}
-                </Text>
-                <Text style={styles.mDesc} numberOfLines={2}>
-                  {m.description}
-                </Text>
-                <Text style={styles.rewards}>
-                  +{m.rewards?.xp ?? 0} XP • +{m.rewards?.gold ?? 0} Gold
-                </Text>
+        <View style={styles.split}>
+          {/* Left: Authentic Ninja Saga Mission Scroll List */}
+          <ScrollView style={styles.listCol} contentContainerStyle={styles.listContent}>
+            {filteredMissions.map((m) => {
+              const locked = (profile?.level ?? 1) < (m.level || 1);
+              const isSelected = selectedMission?.id === m.id;
+              return (
                 <Pressable
-                  style={[styles.fightBtn, locked && styles.fightBtnDisabled]}
-                  disabled={locked || busy}
-                  onPress={() => handleStartMission(m)}
+                  key={m.id}
+                  style={[
+                    styles.missionRow,
+                    isSelected && styles.missionRowSelected,
+                    locked && styles.missionRowLocked,
+                  ]}
+                  onPress={() => {
+                    playClickSfx(serverUrl);
+                    setSelectedId(m.id);
+                  }}
+                >
+                  <View style={styles.gradeSeal}>
+                    <Text style={styles.gradeSealTxt}>{(m.grade || 'C').toUpperCase()}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.rowName} numberOfLines={1}>
+                      {m.name}
+                    </Text>
+                    <Text style={styles.rowSub}>
+                      Lv.{m.level} • +{m.rewards?.xp ?? 0} XP • +{m.rewards?.gold ?? 0} Gold
+                    </Text>
+                  </View>
+                  {locked ? (
+                    <Text style={styles.lockTag}>🔒 Lv.{m.level}</Text>
+                  ) : (
+                    <Text style={styles.arrowTag}>▶</Text>
+                  )}
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+
+          {/* Right: Selected Mission Scroll Brief */}
+          <View style={styles.detailCol}>
+            {selectedMission ? (
+              <>
+                <View style={styles.detailHeader}>
+                  <View style={styles.bigGradeSeal}>
+                    <Text style={styles.bigGradeTxt}>
+                      {(selectedMission.grade || 'C').toUpperCase()}
+                    </Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.detailTitle}>{selectedMission.name}</Text>
+                    <Text style={styles.detailReq}>
+                      Min. Level {selectedMission.level} • {selectedMission.enemies?.length ?? 1} Musuh
+                    </Text>
+                  </View>
+                </View>
+
+                <ScrollView style={styles.descScroll}>
+                  <Text style={styles.detailDesc}>
+                    {selectedMission.description || 'Selesaikan misi shinobi ini untuk melindungi desa!'}
+                  </Text>
+                </ScrollView>
+
+                <View style={styles.rewardBox}>
+                  <Text style={styles.rewardHeading}>HADIAH MISI</Text>
+                  <View style={styles.rewardRow}>
+                    <View style={styles.rewardChip}>
+                      <Text style={styles.rewardChipTxt}>
+                        ⭐ +{(selectedMission.rewards?.xp ?? 0).toLocaleString()} XP
+                      </Text>
+                    </View>
+                    <View style={styles.rewardChip}>
+                      <Text style={styles.rewardChipTxt}>
+                        🪙 +{(selectedMission.rewards?.gold ?? 0).toLocaleString()} Gold
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+
+                <Pressable
+                  style={[
+                    styles.fightBtn,
+                    selectedLocked && styles.fightBtnDisabled,
+                  ]}
+                  disabled={selectedLocked || selectedBusy}
+                  onPress={() => handleStartMission(selectedMission)}
                 >
                   <Text style={styles.fightText}>
-                    {busy ? 'Starting...' : locked ? `Requires Lv.${m.level}` : 'Fight →'}
+                    {selectedBusy
+                      ? 'Memulai Pertarungan...'
+                      : selectedLocked
+                        ? `Butuh Level ${selectedMission.level}`
+                        : '⚔️ Mulai Misi (Fight)'}
                   </Text>
                 </Pressable>
+              </>
+            ) : (
+              <View style={styles.center}>
+                <Text style={styles.loadingText}>Tidak ada misi di grade ini.</Text>
               </View>
-            );
-          })}
-        </ScrollView>
+            )}
+          </View>
+        </View>
       )}
-    </SafeAreaView>
+    </NinjaScrollWindow>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: '#070E1A',
-    padding: 12,
-  },
-  header: {
+  gradeRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 10,
+    gap: 4,
   },
-  backBtn: {
-    backgroundColor: '#1E293B',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
+  gradeTab: {
+    backgroundColor: NS_THEME.tabInactive,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    borderRadius: 6,
+    paddingHorizontal: 9,
+    paddingVertical: 3,
   },
-  backText: {
-    color: '#F8FAFC',
-    fontSize: 12,
-    fontWeight: '700',
+  gradeTabActive: {
+    backgroundColor: NS_THEME.tabActive,
+    borderColor: NS_THEME.woodBorderDark,
   },
-  title: {
-    color: '#F8FAFC',
-    fontSize: 16,
-    fontWeight: '800',
+  gradeTabTxt: {
+    color: NS_THEME.inkDark,
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  gradeTabTxtActive: {
+    color: '#FFFFFF',
   },
   errorText: {
-    color: '#F87171',
-    fontSize: 12,
-    marginBottom: 8,
+    color: '#991B1B',
+    backgroundColor: '#FEE2E2',
+    borderColor: '#DC2626',
+    borderWidth: 1,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    fontSize: 11,
+    fontWeight: '800',
+    marginBottom: 6,
     textAlign: 'center',
   },
   center: {
@@ -150,72 +266,181 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   loadingText: {
-    color: '#94A3B8',
+    color: NS_THEME.inkMid,
     marginTop: 8,
     fontSize: 12,
+    fontWeight: '700',
   },
-  grid: {
+  split: {
+    flex: 1,
     flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: 10,
-    paddingBottom: 16,
   },
-  card: {
-    width: '31.8%',
-    backgroundColor: '#0F172A',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#1E293B',
-    padding: 10,
+  listCol: {
+    flex: 1.25,
   },
-  cardLocked: {
-    opacity: 0.55,
+  listContent: {
+    gap: 6,
+    paddingBottom: 8,
   },
-  cardTop: {
+  missionRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 4,
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: NS_THEME.parchmentCard,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
   },
-  grade: {
-    color: '#F59E0B',
+  missionRowSelected: {
+    backgroundColor: NS_THEME.parchmentSelected,
+    borderColor: NS_THEME.btnOrange,
+    borderWidth: 2,
+  },
+  missionRowLocked: {
+    opacity: 0.65,
+  },
+  gradeSeal: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: '#B45309',
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorderDark,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gradeSealTxt: {
+    color: '#FEF08A',
+    fontSize: 11,
     fontWeight: '900',
+  },
+  rowName: {
+    color: NS_THEME.inkDark,
     fontSize: 12,
+    fontWeight: '900',
   },
-  reqLvl: {
-    color: '#38BDF8',
+  rowSub: {
+    color: NS_THEME.inkSoft,
+    fontSize: 9.5,
     fontWeight: '700',
+    marginTop: 1,
+  },
+  lockTag: {
+    color: '#991B1B',
+    fontSize: 9.5,
+    fontWeight: '900',
+  },
+  arrowTag: {
+    color: NS_THEME.btnOrange,
     fontSize: 11,
+    fontWeight: '900',
   },
-  mName: {
-    color: '#F8FAFC',
-    fontWeight: '700',
-    fontSize: 13,
+  detailCol: {
+    flex: 1,
+    backgroundColor: NS_THEME.parchmentCard,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: NS_THEME.woodBorder,
+    padding: 10,
+    justifyContent: 'space-between',
+    gap: 8,
   },
-  mDesc: {
-    color: '#94A3B8',
-    fontSize: 10,
-    marginTop: 3,
-    minHeight: 28,
+  detailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderBottomWidth: 1.5,
+    borderBottomColor: 'rgba(110, 62, 22, 0.35)',
+    paddingBottom: 8,
   },
-  rewards: {
-    color: '#FACC15',
+  bigGradeSeal: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#C85A17',
+    borderWidth: 2,
+    borderColor: NS_THEME.woodBorderDark,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bigGradeTxt: {
+    color: '#FEF08A',
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  detailTitle: {
+    color: NS_THEME.inkDark,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  detailReq: {
+    color: NS_THEME.inkSoft,
+    fontSize: 10.5,
+    fontWeight: '800',
+    marginTop: 2,
+  },
+  descScroll: {
+    flex: 1,
+  },
+  detailDesc: {
+    color: NS_THEME.inkMid,
+    fontSize: 11.5,
+    lineHeight: 17,
+    fontWeight: '600',
+  },
+  rewardBox: {
+    backgroundColor: NS_THEME.parchmentCardAlt,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    padding: 8,
+    gap: 5,
+  },
+  rewardHeading: {
+    color: NS_THEME.inkDark,
+    fontSize: 9.5,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  rewardRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  rewardChip: {
+    flex: 1,
+    backgroundColor: '#FFF5D6',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: NS_THEME.goldTrim,
+    paddingVertical: 5,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+  },
+  rewardChipTxt: {
+    color: NS_THEME.inkDark,
     fontSize: 11,
-    fontWeight: '700',
-    marginTop: 6,
+    fontWeight: '900',
   },
   fightBtn: {
-    marginTop: 8,
-    backgroundColor: '#EA580C',
-    paddingVertical: 6,
-    borderRadius: 6,
+    backgroundColor: NS_THEME.btnOrange,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: NS_THEME.woodBorderDark,
+    paddingVertical: 9,
     alignItems: 'center',
   },
   fightBtnDisabled: {
-    backgroundColor: '#334155',
+    backgroundColor: NS_THEME.btnDisabled,
   },
   fightText: {
-    color: '#FFF',
-    fontSize: 11,
-    fontWeight: '800',
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0,0,0,0.45)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
 });

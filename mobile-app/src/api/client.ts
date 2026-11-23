@@ -4,6 +4,7 @@ export interface CharacterSummary {
   char_id: number;
   character_name: string;
   character_level: number;
+  character_gender?: number;
   character_rank?: number;
   [key: string]: unknown;
 }
@@ -12,6 +13,7 @@ export interface LoginResponse {
   status: number;
   uid: number;
   username: string;
+  account_type?: number;
   sessionkey: string;
   characters: {
     status?: number;
@@ -116,6 +118,7 @@ export interface BattleFinishResponse {
   victory: boolean;
   xp_reward: number;
   gold_reward: number;
+  premium_bonus?: boolean;
   level: number;
   xp: number;
   gold: number;
@@ -204,6 +207,23 @@ export class MobileApiClient {
       {
         method: 'POST',
         body: JSON.stringify(payload),
+      },
+      {
+        'X-User-Id': String(uid),
+        'X-Session-Key': sessionKey,
+      }
+    );
+  }
+
+  deleteCharacter(
+    uid: number,
+    sessionKey: string,
+    charId: number
+  ): Promise<{ status: number; message?: string; account_tokens?: number; error?: string }> {
+    return this.request<{ status: number; message?: string; account_tokens?: number; error?: string }>(
+      `/api/v1/characters/${charId}`,
+      {
+        method: 'DELETE',
       },
       {
         'X-User-Id': String(uid),

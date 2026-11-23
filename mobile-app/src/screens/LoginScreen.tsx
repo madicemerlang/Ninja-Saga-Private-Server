@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   Pressable,
   StyleSheet,
   Text,
@@ -11,27 +12,24 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { MobileApiClient } from '../api/client';
 import { useAuthStore } from '../store/useAuthStore';
 
+const LOGIN_BG = require('../../assets/login_bg.jpg');
+
 export function LoginScreen() {
   const serverUrl = useAuthStore((s) => s.serverUrl);
-  const setServerUrl = useAuthStore((s) => s.setServerUrl);
   const setLoginSession = useAuthStore((s) => s.setLoginSession);
-  const navigate = useAuthStore((s) => s.navigate);
 
   const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [urlInput, setUrlInput] = useState(serverUrl);
   const [username, setUsername] = useState('admin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('admin');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  const api = useMemo(() => new MobileApiClient(urlInput), [urlInput]);
+  const api = useMemo(() => new MobileApiClient(serverUrl), [serverUrl]);
 
   const handleSubmit = async () => {
     setLoading(true);
     setMessage(null);
-    setServerUrl(urlInput);
-    api.setBaseUrl(urlInput);
 
     try {
       if (mode === 'register') {
@@ -48,158 +46,147 @@ export function LoginScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.root}>
-      {/* Left Hero Panel */}
-      <View style={styles.hero}>
-        <Text style={styles.brand}>NINJA SAGA</Text>
-        <Text style={styles.subtitle}>Mobile Edition • Ruffle WASM + Laravel Docker</Text>
-        <Text style={styles.desc}>
-          Landscape hybrid client dengan render aset Flash (.swf) langsung dari private server.
-        </Text>
+    <View style={styles.root}>
+      <Image source={LOGIN_BG} style={styles.bgImg} resizeMode="cover" />
+      <View style={styles.scrim} />
 
-        <View style={styles.serverBox}>
-          <Text style={styles.label}>Server URL (LAN IP / VPS)</Text>
+      <SafeAreaView style={styles.content}>
+        <View style={styles.hero}>
+          <Text style={styles.brand}>NINJA SAGA</Text>
+        </View>
+
+        <View style={styles.card}>
+          <View style={styles.tabs}>
+            <Pressable
+              style={[styles.tab, mode === 'login' && styles.tabActive]}
+              onPress={() => {
+                setMode('login');
+                setMessage(null);
+              }}
+            >
+              <Text style={styles.tabText}>Login</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.tab, mode === 'register' && styles.tabActive]}
+              onPress={() => {
+                setMode('register');
+                setMessage(null);
+              }}
+            >
+              <Text style={styles.tabText}>Register</Text>
+            </Pressable>
+          </View>
+
+          <Text style={styles.label}>Username</Text>
           <TextInput
             style={styles.input}
-            value={urlInput}
-            onChangeText={setUrlInput}
-            placeholder="http://192.168.101.170:8080"
-            placeholderTextColor="#64748B"
+            value={username}
+            onChangeText={setUsername}
+            placeholder="Username"
+            placeholderTextColor="#94A3B8"
             autoCapitalize="none"
           />
-        </View>
 
-        <Pressable style={styles.pocLink} onPress={() => { setServerUrl(urlInput); navigate('poc'); }}>
-          <Text style={styles.pocLinkText}>Open Ruffle SWF PoC Lab →</Text>
-        </Pressable>
-      </View>
-
-      {/* Right Auth Card */}
-      <View style={styles.card}>
-        <View style={styles.tabs}>
-          <Pressable
-            style={[styles.tab, mode === 'login' && styles.tabActive]}
-            onPress={() => { setMode('login'); setMessage(null); }}
-          >
-            <Text style={styles.tabText}>Login</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.tab, mode === 'register' && styles.tabActive]}
-            onPress={() => { setMode('register'); setMessage(null); }}
-          >
-            <Text style={styles.tabText}>Register</Text>
-          </Pressable>
-        </View>
-
-        <Text style={styles.label}>Username</Text>
-        <TextInput
-          style={styles.input}
-          value={username}
-          onChangeText={setUsername}
-          placeholder="admin"
-          placeholderTextColor="#64748B"
-          autoCapitalize="none"
-        />
-
-        {mode === 'register' && (
-          <>
-            <Text style={styles.label}>Email</Text>
-            <TextInput
-              style={styles.input}
-              value={email}
-              onChangeText={setEmail}
-              placeholder="ninja@example.com"
-              placeholderTextColor="#64748B"
-              autoCapitalize="none"
-              keyboardType="email-address"
-            />
-          </>
-        )}
-
-        <Text style={styles.label}>Password</Text>
-        <TextInput
-          style={styles.input}
-          value={password}
-          onChangeText={setPassword}
-          placeholder="••••••••"
-          placeholderTextColor="#64748B"
-          secureTextEntry
-        />
-
-        {message && <Text style={styles.errorText}>{message}</Text>}
-
-        <Pressable style={styles.submitBtn} onPress={handleSubmit} disabled={loading}>
-          {loading ? (
-            <ActivityIndicator color="#FFFFFF" />
-          ) : (
-            <Text style={styles.submitText}>
-              {mode === 'login' ? 'Enter Village' : 'Create Ninja Account'}
-            </Text>
+          {mode === 'register' && (
+            <>
+              <Text style={styles.label}>Email</Text>
+              <TextInput
+                style={styles.input}
+                value={email}
+                onChangeText={setEmail}
+                placeholder="ninja@example.com"
+                placeholderTextColor="#94A3B8"
+                autoCapitalize="none"
+                keyboardType="email-address"
+              />
+            </>
           )}
-        </Pressable>
-      </View>
-    </SafeAreaView>
+
+          <Text style={styles.label}>Password</Text>
+          <TextInput
+            style={styles.input}
+            value={password}
+            onChangeText={setPassword}
+            placeholder="••••••••"
+            placeholderTextColor="#94A3B8"
+            secureTextEntry
+          />
+
+          {message && <Text style={styles.errorText}>{message}</Text>}
+
+          <Pressable style={styles.submitBtn} onPress={handleSubmit} disabled={loading}>
+            {loading ? (
+              <ActivityIndicator color="#FFFFFF" />
+            ) : (
+              <Text style={styles.submitText}>
+                {mode === 'login' ? 'Login' : 'Register'}
+              </Text>
+            )}
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    flexDirection: 'row',
     backgroundColor: '#070E1A',
-    padding: 18,
-    gap: 18,
+    position: 'relative',
+  },
+  bgImg: {
+    ...StyleSheet.absoluteFill,
+    width: '100%',
+    height: '100%',
+  },
+  scrim: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(5, 9, 18, 0.22)',
+  },
+  content: {
+    flex: 1,
+    flexDirection: 'row',
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    gap: 24,
     alignItems: 'center',
+    justifyContent: 'space-between',
   },
   hero: {
-    flex: 1.15,
-    justifyContent: 'center',
-    paddingHorizontal: 10,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    paddingTop: 18,
   },
   brand: {
-    color: '#F59E0B',
-    fontSize: 32,
+    color: '#FDE047',
+    fontSize: 42,
     fontWeight: '900',
-    letterSpacing: 2,
-  },
-  subtitle: {
-    color: '#38BDF8',
-    fontSize: 12,
-    fontWeight: '600',
-    marginTop: 4,
-  },
-  desc: {
-    color: '#94A3B8',
-    fontSize: 12,
-    marginTop: 10,
-    lineHeight: 18,
-  },
-  serverBox: {
-    marginTop: 18,
-  },
-  pocLink: {
-    marginTop: 14,
-    alignSelf: 'flex-start',
-  },
-  pocLinkText: {
-    color: '#94A3B8',
-    fontSize: 11,
-    textDecorationLine: 'underline',
+    letterSpacing: 3,
+    textShadowColor: '#000000',
+    textShadowOffset: { width: 2, height: 3 },
+    textShadowRadius: 8,
   },
   card: {
-    flex: 1,
-    backgroundColor: '#0F172A',
+    width: 330,
+    backgroundColor: 'rgba(10, 15, 28, 0.88)',
     borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#1E293B',
+    borderWidth: 1.5,
+    borderColor: '#C8A24A',
     padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.75,
+    shadowRadius: 12,
+    elevation: 10,
   },
   tabs: {
     flexDirection: 'row',
-    backgroundColor: '#1E293B',
+    backgroundColor: 'rgba(30, 41, 59, 0.9)',
     borderRadius: 8,
     padding: 3,
-    marginBottom: 12,
+    marginBottom: 10,
   },
   tab: {
     flex: 1,
@@ -208,44 +195,49 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   tabActive: {
-    backgroundColor: '#2563EB',
+    backgroundColor: '#EA580C',
   },
   tabText: {
     color: '#F8FAFC',
-    fontWeight: '700',
+    fontWeight: '800',
     fontSize: 12,
   },
   label: {
-    color: '#CBD5E1',
+    color: '#E2E8F0',
     fontSize: 11,
-    fontWeight: '600',
+    fontWeight: '700',
     marginBottom: 4,
     marginTop: 6,
   },
   input: {
-    backgroundColor: '#1E293B',
+    backgroundColor: 'rgba(15, 23, 42, 0.95)',
     color: '#F8FAFC',
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
     paddingHorizontal: 10,
     paddingVertical: 8,
     fontSize: 13,
   },
   errorText: {
-    color: '#F87171',
+    color: '#FCA5A5',
     fontSize: 11,
+    fontWeight: '700',
     marginTop: 8,
   },
   submitBtn: {
     marginTop: 14,
     backgroundColor: '#EA580C',
+    borderWidth: 1,
+    borderColor: '#FDE047',
     paddingVertical: 11,
     borderRadius: 8,
     alignItems: 'center',
   },
   submitText: {
     color: '#FFFFFF',
-    fontWeight: '800',
+    fontWeight: '900',
     fontSize: 13,
-    letterSpacing: 0.5,
+    letterSpacing: 0.6,
   },
 });

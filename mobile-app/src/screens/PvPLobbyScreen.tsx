@@ -6,10 +6,11 @@ import {
   Text,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import type { Socket } from 'socket.io-client';
 import { getPvpSocket } from '../api/sockets';
 import { playClickSfx } from '../audio/audioManager';
+import { BUILDING_BGS } from '../components/BuildingSceneBackdrop';
+import { NinjaScrollWindow, NS_THEME } from '../components/NinjaScrollWindow';
 import { useAuthStore } from '../store/useAuthStore';
 
 export function PvPLobbyScreen() {
@@ -101,7 +102,6 @@ export function PvPLobbyScreen() {
 
     return () => {
       socket.off('connect', handleConnect);
-      // Keep socket open if entering battle!
     };
   }, [serverUrl, pvpSocketUrl, profile, sessionKey, setActivePvpBattle, navigate]);
 
@@ -138,34 +138,38 @@ export function PvPLobbyScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.root}>
-      <View style={styles.header}>
-        <Pressable style={styles.backBtn} onPress={() => navigate('hub')}>
-          <Text style={styles.backText}>← Village Hub</Text>
-        </Pressable>
-        <Text style={styles.title}>
-          Live PvP Arena {connected ? '• ONLINE' : '• Connecting...'}
-        </Text>
-        <Text style={styles.onlineText}>{activePlayers} Fighters Online</Text>
-      </View>
-
+    <NinjaScrollWindow
+      title="PvP Arena"
+      bgSource={BUILDING_BGS.pvpArena}
+      onClose={() => {
+        playClickSfx(serverUrl);
+        navigate('hub');
+      }}
+      rightContent={
+        <View style={styles.statusPill}>
+          <Text style={styles.statusTxt}>
+            {connected ? `🟢 ${activePlayers} Fighters Online` : '🟡 Connecting...'}
+          </Text>
+        </View>
+      }
+    >
       <View style={styles.body}>
         <View style={styles.leftCard}>
           <Text style={styles.cardTitle}>Fighter Profile</Text>
-          <Text style={styles.meta}>Name: {profile?.name}</Text>
+          <Text style={styles.meta}>Shinobi: {profile?.name}</Text>
           <Text style={styles.meta}>Level: {profile?.level}</Text>
           <Text style={styles.meta}>Weapon: {profile?.weapon}</Text>
-          <Text style={styles.meta}>
+          <Text style={styles.meta} numberOfLines={2}>
             Jutsu Loadout: {profile?.equippedSkills.join(', ')}
           </Text>
 
           <Pressable
-            style={[styles.primaryBtn, queuing && { backgroundColor: '#D97706' }]}
+            style={[styles.primaryBtn, queuing && { backgroundColor: '#B45309' }]}
             onPress={toggleMatchmaking}
             disabled={!connected}
           >
             <Text style={styles.btnText}>
-              {queuing ? 'Cancel Matchmaking...' : 'Quick Matchmaking (1v1)'}
+              {queuing ? 'Cancel Matchmaking...' : '⚔️ Quick Matchmaking (1v1)'}
             </Text>
           </Pressable>
 
@@ -174,7 +178,7 @@ export function PvPLobbyScreen() {
             onPress={handleStartPractice}
             disabled={!connected}
           >
-            <Text style={styles.btnText}>Spar with Shadow Rival (AI Practice)</Text>
+            <Text style={styles.btnText}>🥷 Spar with Shadow Rival (AI)</Text>
           </Pressable>
 
           <Pressable
@@ -182,12 +186,12 @@ export function PvPLobbyScreen() {
             onPress={handleCreateRoom}
             disabled={!connected}
           >
-            <Text style={styles.btnText}>Create Custom Room</Text>
+            <Text style={styles.btnText}>🏮 Create Custom Room</Text>
           </Pressable>
         </View>
 
         <View style={styles.rightCard}>
-          <Text style={styles.cardTitle}>PvP Socket.IO Live Stream (:3000/pvp)</Text>
+          <Text style={styles.cardTitle}>Arena Battle Log</Text>
           <ScrollView style={styles.logBox}>
             {events.map((e, i) => (
               <Text key={i} style={styles.logLine}>
@@ -197,109 +201,98 @@ export function PvPLobbyScreen() {
           </ScrollView>
         </View>
       </View>
-    </SafeAreaView>
+    </NinjaScrollWindow>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: '#070E1A',
-    padding: 12,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 8,
-  },
-  backBtn: {
-    backgroundColor: '#1E293B',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+  statusPill: {
+    backgroundColor: '#3E2008',
     borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.goldTrim,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
   },
-  backText: {
-    color: '#F8FAFC',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  title: {
-    color: '#F8FAFC',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  onlineText: {
-    color: '#F59E0B',
-    fontSize: 12,
-    fontWeight: '700',
-  },
+  statusTxt: { color: '#FDE047', fontSize: 10.5, fontWeight: '900' },
   body: {
     flex: 1,
     flexDirection: 'row',
-    gap: 12,
+    gap: 10,
   },
   leftCard: {
-    flex: 0.9,
-    backgroundColor: '#0F172A',
+    flex: 0.95,
+    backgroundColor: NS_THEME.parchmentCard,
     borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#1E293B',
-    padding: 12,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    padding: 10,
   },
   rightCard: {
-    flex: 1.4,
-    backgroundColor: '#0F172A',
+    flex: 1.35,
+    backgroundColor: NS_THEME.parchmentCard,
     borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#1E293B',
-    padding: 12,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    padding: 10,
   },
   cardTitle: {
-    color: '#F59E0B',
+    color: NS_THEME.inkDark,
     fontSize: 13,
-    fontWeight: '800',
-    marginBottom: 8,
+    fontWeight: '900',
+    marginBottom: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(110, 62, 22, 0.35)',
+    paddingBottom: 4,
   },
   meta: {
-    color: '#E2E8F0',
-    fontSize: 12,
-    marginBottom: 5,
+    color: NS_THEME.inkMid,
+    fontSize: 11.5,
+    fontWeight: '700',
+    marginBottom: 4,
   },
   primaryBtn: {
-    marginTop: 14,
-    backgroundColor: '#DC2626',
-    paddingVertical: 10,
+    marginTop: 10,
+    backgroundColor: NS_THEME.btnRed,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorderDark,
+    paddingVertical: 9,
     borderRadius: 8,
     alignItems: 'center',
   },
   practiceBtn: {
-    marginTop: 8,
-    backgroundColor: '#7C3AED',
-    paddingVertical: 10,
+    marginTop: 7,
+    backgroundColor: NS_THEME.btnPurple,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorderDark,
+    paddingVertical: 9,
     borderRadius: 8,
     alignItems: 'center',
   },
   secondaryBtn: {
-    marginTop: 8,
-    backgroundColor: '#2563EB',
-    paddingVertical: 9,
+    marginTop: 7,
+    backgroundColor: NS_THEME.btnBlue,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorderDark,
+    paddingVertical: 8,
     borderRadius: 8,
     alignItems: 'center',
   },
   btnText: {
     color: '#FFF',
-    fontSize: 12,
-    fontWeight: '800',
+    fontSize: 11.5,
+    fontWeight: '900',
   },
   logBox: {
     flex: 1,
-    backgroundColor: '#020617',
+    backgroundColor: NS_THEME.stageDark,
     borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
     padding: 8,
   },
   logLine: {
-    color: '#86EFAC',
+    color: '#FDE68A',
     fontSize: 10,
     fontFamily: 'monospace',
     marginBottom: 3,

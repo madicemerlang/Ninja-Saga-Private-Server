@@ -19,15 +19,15 @@ import lzma
 
 DEFINITION_TAGS = {2, 6, 11, 14, 20, 21, 22, 32, 33, 34, 35, 36, 37, 39, 46, 48, 75, 83, 84}
 
-ARENA_W = 760
-ARENA_H = 360
-PLAYER_TX = 155.0
-PLAYER_TY = 280.0
-ENEMY_TX = 615.0
-ENEMY_TY = 280.0
-PLAYER_MELEE_TX = 510.0  # Right in front of Enemy (615) so melee slashes & melee jutsu connect
-ENEMY_MELEE_TX = 260.0   # Right in front of Player (155) so enemy melee slashes connect
-CHAR_SCALE = 0.52
+ARENA_W = 860
+ARENA_H = 440
+PLAYER_TX = 220.0
+PLAYER_TY = 255.0
+ENEMY_TX = 630.0
+ENEMY_TY = 255.0
+PLAYER_MELEE_TX = 572.0  # Right in front of Enemy (630) so 0.25-scale melee slashes connect
+ENEMY_MELEE_TX = 278.0   # Right in front of Player (220) so 0.25-scale enemy slashes connect
+CHAR_SCALE = 0.25
 FPS_36_FIXED = 36 * 256  # 36.0 FPS like Ninja Horizon's fps36
 
 PLAYER_PART_SLOTS = {
@@ -593,12 +593,70 @@ def cmd_build_entity(input_path: str, output_path: str, anim: str):
         f.write(swf_bytes)
 
 
-def load_remapped_item_parts(item_swf_path: str, id_offset: int):
+def encode_cxform_color(rgb_int: int) -> bytes:
+    """
+    Encodes a SWF CXFORMWITHALPHA equivalent to ActionScript ColorTransform.color = rgb_int:
+    R' = 0*R + r, G' = 0*G + g, B' = 0*B + b, A' = 1.0*A + 0.
+    """
+    r = (rgb_int >> 16) & 0xFF
+    g = (rgb_int >> 8) & 0xFF
+    b = rgb_int & 0xFF
+    vals = [0, 0, 0, 256, r, g, b, 0]
+    nbits = max(2, sbits_len(vals))
+    return pack_bits([
+        (1, 1),   # HasAddTerms = 1
+        (1, 1),   # HasMultTerms = 1
+        (nbits, 4),
+        (0, nbits), (0, nbits), (0, nbits), (256, nbits),
+        (r, nbits), (g, nbits), (b, nbits), (0, nbits),
+    ])
+
+
+def inject_cxform_into_place2(body: bytes, cxform_bytes: bytes) -> bytes:
+    """Replaces or inserts a CXFORMWITHALPHA inside a PlaceObject2 (tag 26) body."""
+    flags = body[0]
+    pos = 3
+    if flags & 0x02:
+        pos += 2
+    if flags & 0x04:
+        pos = skip_matrix(body, pos)
+    after_cx = skip_cxform(body, pos) if (flags & 0x08) else pos
+    new_flags = flags | 0x08
+    return bytes([new_flags]) + body[1:pos] + cxform_bytes + body[after_cx:]
+
+
+def parse_hair_colors(hair_color: str):
+    """Parses Ninja Saga hair_color 'primaryInt|secondaryInt' into (rgb1, rgb2) or None."""
+    if not hair_color or hair_color.strip() in ("", "null|null"):
+        return None
+    parts = hair_color.split("|")
+    try:
+        c1 = int(parts[0].strip())
+    except Exception:
+        return None
+    try:
+        c2 = int(parts[1].strip()) if len(parts) > 1 and parts[1].strip() != "" else 0
+    except Exception:
+        c2 = 0
+    if c1 == 0 and c2 == 0:
+        return (0x1B1F2A, 0x0F131C)  # Rich ninja black with subtle darker shading
+    if c2 == 0:
+        r = max(0, int(((c1 >> 16) & 0xFF) * 0.72))
+        g = max(0, int(((c1 >> 8) & 0xFF) * 0.72))
+        b = max(0, int((c1 & 0xFF) * 0.72))
+        c2 = (r << 16) | (g << 8) | b
+    return (c1 & 0xFFFFFF, c2 & 0xFFFFFF)
+
+
+def load_remapped_item_parts(item_swf_path: str, id_offset: int, hair_rgb_pair=None):
     if not os.path.isfile(item_swf_path):
         return [], {}
     data = decompress_swf(item_swf_path)
     _, _, _, tag_start = parse_header(data)
     tags = parse_tags(data, tag_start)
+
+    cx1 = encode_cxform_color(hair_rgb_pair[0]) if hair_rgb_pair else None
+    cx2 = encode_cxform_color(hair_rgb_pair[1]) if hair_rgb_pair else None
 
     remapped_tags = []
     part_map = {}
@@ -613,9 +671,16 @@ def load_remapped_item_parts(item_swf_path: str, id_offset: int):
                 for sc, sb in parse_tags(b, 4):
                     if sc in (14, 15, 18, 19, 45):
                         continue
-                    if sc == 26 and (sb[0] & 0x02):
-                        ref_id = struct.unpack("<H", sb[3:5])[0] + id_offset
-                        sb = sb[:3] + struct.pack("<H", ref_id) + sb[5:]
+                    if sc == 26:
+                        if sb[0] & 0x02:
+                            ref_id = struct.unpack("<H", sb[3:5])[0] + id_offset
+                            sb = sb[:3] + struct.pack("<H", ref_id) + sb[5:]
+                        if cx1 is not None:
+                            _, _, _, child_nm = parse_place2_info(sb)
+                            if child_nm == "hair_color_1":
+                                sb = inject_cxform_into_place2(sb, cx1)
+                            elif child_nm == "hair_color_2" and cx2 is not None:
+                                sb = inject_cxform_into_place2(sb, cx2)
                     elif sc == 70:
                         _, _, _, cid, _, cpos = parse_place3_info(sb)
                         if cid is not None and cpos is not None:
@@ -633,7 +698,15 @@ def load_remapped_item_parts(item_swf_path: str, id_offset: int):
     return remapped_tags, part_map
 
 
-def load_player_equipment_tags(items_dir: str, gender: int, hair: str, clothing: str, weapon: str, back: str):
+def load_player_equipment_tags(
+    items_dir: str,
+    gender: int,
+    hair: str,
+    clothing: str,
+    weapon: str,
+    back: str,
+    hair_color: str = "",
+):
     g_suffix = "_0" if int(gender) == 0 else "_1"
     face_file = os.path.join(items_dir, f"face_01{g_suffix}.swf")
 
@@ -647,18 +720,19 @@ def load_player_equipment_tags(items_dir: str, gender: int, hair: str, clothing:
             p = os.path.join(items_dir, fallback if fallback.endswith(".swf") else f"{fallback}.swf")
         return p
 
+    hair_rgb_pair = parse_hair_colors(hair_color)
     item_files = [
-        (face_file, 10000),
-        (resolve_item(hair, f"hair_01{g_suffix}.swf"), 12000),
-        (resolve_item(clothing, f"set_01{g_suffix}.swf"), 14000),
-        (resolve_item(weapon, "wpn_01.swf"), 18000),
-        (resolve_item(back, "back_01.swf"), 20000),
+        (face_file, 10000, None),
+        (resolve_item(hair, f"hair_01{g_suffix}.swf"), 12000, hair_rgb_pair),
+        (resolve_item(clothing, f"set_01{g_suffix}.swf"), 14000, None),
+        (resolve_item(weapon, "wpn_01.swf"), 18000, None),
+        (resolve_item(back, "back_01.swf"), 20000, None),
     ]
 
     extra_def_tags = []
     parts_by_name = {}
-    for fpath, offset in item_files:
-        rtags, pmap = load_remapped_item_parts(fpath, offset)
+    for fpath, offset, h_rgb in item_files:
+        rtags, pmap = load_remapped_item_parts(fpath, offset, hair_rgb_pair=h_rgb)
         extra_def_tags.extend(rtags)
         parts_by_name.update(pmap)
 
@@ -795,16 +869,129 @@ def cmd_build_player_skill(
     )
     skill_defs, main_skill_sid, _ = load_dressed_skill_defs(skill_swf_path, 30000, parts_by_name)
 
+    # 2.5x zoomed-in Academy skill preview stage (CHAR_SCALE 0.25 * 2.5 = 0.625)
+    PREVIEW_W = 640
+    PREVIEW_H = 360
+    PREVIEW_SCALE = CHAR_SCALE * 2.5
+    PREVIEW_TX = 185.0
+    PREVIEW_TY = 265.0
+
     out_tags = [encode_tag(69, b"\x20\x00\x00\x00")]
     out_tags.extend(extra_def_tags)
     out_tags.extend(skill_defs)
     if main_skill_sid is not None:
-        out_tags.append(encode_place_object2(1, main_skill_sid, PLAYER_TX, PLAYER_TY, -CHAR_SCALE, CHAR_SCALE))
+        out_tags.append(encode_place_object2(1, main_skill_sid, PREVIEW_TX, PREVIEW_TY, -PREVIEW_SCALE, PREVIEW_SCALE))
     out_tags.append(encode_tag(1, b""))
     out_tags.append(encode_tag(0, b""))
 
-    rect = encode_rect(0, ARENA_W, 0, ARENA_H)
+    rect = encode_rect(0, PREVIEW_W, 0, PREVIEW_H)
     swf_bytes = build_swf(19, rect, FPS_36_FIXED, 1, b"".join(out_tags))
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "wb") as f:
+        f.write(swf_bytes)
+
+
+def cmd_build_skill_icons(skills_dir: str, skills_csv: str, output_path: str):
+    """
+    Compiles a compact 1-frame horizontal sprite-sheet SWF containing the authentic
+    50x50 'icon' vector sprite from up to 12 asset SWFs (skills/items/materials/pets, 64x64 cell per icon).
+    """
+    skill_ids = [s.strip() for s in skills_csv.split(",") if s.strip()][:12]
+    if not skill_ids:
+        skill_ids = ["skill_01"]
+
+    CELL = 64
+    out_tags = [encode_tag(69, b"\x20\x00\x00\x00")]
+    placed = []
+
+    for idx, raw_id in enumerate(skill_ids):
+        sk_id = raw_id.replace(".swf", "")
+        sk_path = os.path.join(skills_dir, f"{sk_id}.swf")
+        if not os.path.isfile(sk_path):
+            fallback = os.path.join(skills_dir, "skill_01.swf")
+            if os.path.isfile(fallback):
+                sk_path = fallback
+            else:
+                continue
+
+        try:
+            d = decompress_swf(sk_path)
+            _, _, _, ts = parse_header(d)
+            tags = parse_tags(d, ts)
+            icon_cid = None
+            fallback_cid = None
+            defs_by_id = {}
+            for c, b in tags:
+                if c in DEFINITION_TAGS and c not in (14,) and len(b) >= 2:
+                    cid = struct.unpack("<H", b[:2])[0]
+                    defs_by_id[cid] = (c, b)
+                elif c == 26:
+                    _, _, cid, nm = parse_place2_info(b)
+                    if nm == "icon" and cid is not None:
+                        icon_cid = cid
+                    elif nm in ("pet_head", "upper_body", "weapon", "back_item", "hair") and cid is not None and fallback_cid is None:
+                        fallback_cid = cid
+            if icon_cid is None:
+                icon_cid = fallback_cid
+            if icon_cid is None or icon_cid not in defs_by_id:
+                continue
+
+            # Collect only definitions referenced by icon_cid (BFS)
+            needed = set()
+            queue = [icon_cid]
+            while queue:
+                cur = queue.pop(0)
+                if cur in needed or cur not in defs_by_id:
+                    continue
+                needed.add(cur)
+                dc, db = defs_by_id[cur]
+                if dc == 39:
+                    for sc, sb_b in parse_tags(db, 4):
+                        if sc == 26 and (sb_b[0] & 0x02):
+                            ref = struct.unpack("<H", sb_b[3:5])[0]
+                            queue.append(ref)
+                        elif sc == 70:
+                            _, _, _, ref_cid, _, _ = parse_place3_info(sb_b)
+                            if ref_cid is not None:
+                                queue.append(ref_cid)
+
+            id_offset = 1000 + idx * 500
+            for cid in sorted(needed):
+                dc, db = defs_by_id[cid]
+                new_id = cid + id_offset
+                if dc in (2, 22, 32):
+                    out_tags.append(encode_tag(dc, remap_shape_bitmap_ids(dc, db, id_offset)))
+                elif dc == 39:
+                    sfc = struct.unpack("<H", db[2:4])[0]
+                    sub_chunks = []
+                    for sc, sb_b in parse_tags(db, 4):
+                        if sc in (12, 14, 15, 18, 19, 45):
+                            continue
+                        if sc == 26 and (sb_b[0] & 0x02):
+                            ref = struct.unpack("<H", sb_b[3:5])[0] + id_offset
+                            sb_b = sb_b[:3] + struct.pack("<H", ref) + sb_b[5:]
+                        elif sc == 70:
+                            _, _, _, ref_cid, _, cpos = parse_place3_info(sb_b)
+                            if ref_cid is not None and cpos is not None:
+                                sb_b = sb_b[:cpos] + struct.pack("<H", ref_cid + id_offset) + sb_b[cpos + 2 :]
+                        sub_chunks.append(encode_tag(sc, sb_b))
+                    out_tags.append(encode_tag(39, struct.pack("<HH", new_id, sfc) + b"".join(sub_chunks)))
+                else:
+                    out_tags.append(encode_tag(dc, struct.pack("<H", new_id) + db[2:]))
+
+            # Fill the entire 64x64 cell edge-to-edge with the 50x50 icon (scale 1.28)
+            placed.append((idx + 1, icon_cid + id_offset, idx * CELL, 0.0))
+        except Exception:
+            continue
+
+    for dp, cid, tx, ty in placed:
+        out_tags.append(encode_place_object2(dp, cid, tx, ty, 1.28, 1.28))
+
+    out_tags.append(encode_tag(1, b""))
+    out_tags.append(encode_tag(0, b""))
+
+    rect = encode_rect(0, len(skill_ids) * CELL, 0, CELL)
+    swf_bytes = build_swf(19, rect, 12 * 256, 1, b"".join(out_tags))
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "wb") as f:
         f.write(swf_bytes)
@@ -879,13 +1066,15 @@ def cmd_build_player(
     clothing: str,
     weapon: str,
     back: str,
+    bg_swf_path: str = "",
+    hair_color: str = "",
 ):
     data = decompress_swf(base_swf_path)
     version, _, _, tag_start = parse_header(data)
     base_tags = parse_tags(data, tag_start)
 
     extra_def_tags, parts_by_name = load_player_equipment_tags(
-        items_dir, gender, hair, clothing, weapon, back
+        items_dir, gender, hair, clothing, weapon, back, hair_color=hair_color
     )
     slot_replacements = {}
     for part_name, new_cid in parts_by_name.items():
@@ -918,15 +1107,206 @@ def cmd_build_player(
                 b = inject_sprite_controller(b, anim, is_skill=False)
         out_tags.append(encode_tag(c, b))
 
-    out_tags.append(encode_place_object2(1, 698, PLAYER_TX, PLAYER_TY, -CHAR_SCALE, CHAR_SCALE))
+    if bg_swf_path == "__portrait__":
+        # Authentic Ninja Saga head portrait: Sprite 521 (face + hair + hair_color, 1 frame)
+        # Raised 50px (ty=107) so head & hair sit dead-center inside the 160x160 portrait frame
+        out_tags.append(encode_place_object2(1, 521, 75.0, 107.0, -1.25, 1.25))
+        rect = encode_rect(0, 160, 0, 160)
+    elif bg_swf_path and os.path.isfile(bg_swf_path):
+        bg_def_tags, bg_cid, bg_w, bg_h = load_mission_bg_defs(bg_swf_path, id_offset=45000)
+        out_tags.extend(bg_def_tags)
+        if bg_cid is not None:
+            bg_scale = max(ARENA_W / float(bg_w), ARENA_H / float(bg_h))
+            bg_tx = (ARENA_W - bg_w * bg_scale) / 2.0
+            bg_ty = (ARENA_H - bg_h * bg_scale) / 2.0
+            out_tags.append(encode_place_object2(1, bg_cid, bg_tx, bg_ty, bg_scale, bg_scale, name="bg"))
+        # Place player standing cleanly in the Fire Village plaza (left-center)
+        out_tags.append(encode_place_object2(2, 698, 200.0, 342.0, -0.42, 0.42))
+        rect = encode_rect(0, ARENA_W, 0, ARENA_H)
+    else:
+        # Centered zoomed-in character preview (for Create New Ninja & Shop Fitting Room)
+        out_tags.append(encode_place_object2(1, 698, 220.0, 290.0, -0.62, 0.62))
+        rect = encode_rect(0, 440, 0, 360)
+
     out_tags.append(encode_tag(1, b""))
     out_tags.append(encode_tag(0, b""))
 
-    rect = encode_rect(0, ARENA_W, 0, ARENA_H)
     swf_bytes = build_swf(version, rect, FPS_36_FIXED, 1, b"".join(out_tags))
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "wb") as f:
         f.write(swf_bytes)
+
+
+def parse_rect_px(buf: bytes, pos: int):
+    """Parses a SWF RECT structure and returns (xmin_px, xmax_px, ymin_px, ymax_px, end_pos)."""
+    bit_pos = pos * 8
+    def rbits(n):
+        nonlocal bit_pos
+        v = 0
+        for _ in range(n):
+            v = (v << 1) | ((buf[bit_pos >> 3] >> (7 - (bit_pos & 7))) & 1)
+            bit_pos += 1
+        return v
+    def rsbits(n):
+        v = rbits(n)
+        if n > 0 and (v & (1 << (n - 1))):
+            v -= (1 << n)
+        return v
+    nbits = rbits(5)
+    xmin = rsbits(nbits) / 20.0
+    xmax = rsbits(nbits) / 20.0
+    ymin = rsbits(nbits) / 20.0
+    ymax = rsbits(nbits) / 20.0
+    return xmin, xmax, ymin, ymax, (bit_pos + 7) // 8
+
+
+def remap_shape_bitmap_ids(tag_code: int, body: bytes, id_offset: int) -> bytes:
+    """Remaps ShapeId and any BitmapId entries inside DefineShape/2/3 FillStyleArray."""
+    if len(body) < 4:
+        return body
+    old_id = struct.unpack("<H", body[:2])[0]
+    new_id = old_id + id_offset
+    out = bytearray(struct.pack("<H", new_id) + body[2:])
+    try:
+        _, _, _, _, pos = parse_rect_px(body, 2)
+        if pos >= len(body):
+            return bytes(out)
+        fill_count = body[pos]
+        pos += 1
+        if fill_count == 0xFF and pos + 2 <= len(body):
+            fill_count = struct.unpack("<H", body[pos:pos + 2])[0]
+            pos += 2
+        has_alpha = tag_code in (32, 83)
+        for _ in range(fill_count):
+            if pos >= len(body):
+                break
+            ftype = body[pos]
+            pos += 1
+            if ftype == 0x00:
+                pos += 4 if has_alpha else 3
+            elif ftype in (0x10, 0x12, 0x13):
+                pos = skip_matrix(body, pos)
+                if pos >= len(body):
+                    break
+                grad_cnt = body[pos] & 0x0F
+                pos += 1 + grad_cnt * (5 if has_alpha else 4)
+                if ftype == 0x13:
+                    pos += 2
+            elif ftype in (0x40, 0x41, 0x42, 0x43):
+                if pos + 2 <= len(body):
+                    old_bmp = struct.unpack("<H", body[pos:pos + 2])[0]
+                    if old_bmp != 0xFFFF:
+                        struct.pack_into("<H", out, pos, old_bmp + id_offset)
+                pos += 2
+                pos = skip_matrix(body, pos)
+            else:
+                break
+    except Exception:
+        pass
+    return bytes(out)
+
+
+def load_mission_bg_defs(bg_swf_path: str, id_offset: int = 45000):
+    """
+    Loads a mission background SWF (e.g. mission_01.swf), remaps all definitions by id_offset,
+    and returns (def_tags, bg_cid, bg_w, bg_h).
+    """
+    if not bg_swf_path or not os.path.isfile(bg_swf_path):
+        return [], None, 960.0, 550.0
+    bg_data = decompress_swf(bg_swf_path)
+    _, _, _, bg_tag_start = parse_header(bg_data)
+    xmin, xmax, ymin, ymax, _ = parse_rect_px(bg_data, 8)
+    bg_w = max(100.0, xmax - xmin)
+    bg_h = max(100.0, ymax - ymin)
+    bg_tags = parse_tags(bg_data, bg_tag_start)
+
+    def_tags = []
+    root_cid = None
+    last_sprite_cid = None
+    for c, b in bg_tags:
+        if c == 26 and (b[0] & 0x02):
+            _, _, cid, _ = parse_place2_info(b)
+            if cid is not None and root_cid is None:
+                root_cid = cid + id_offset
+        if c not in DEFINITION_TAGS or c in (14,):
+            continue
+        if len(b) < 2:
+            continue
+        old_id = struct.unpack("<H", b[:2])[0]
+        new_id = old_id + id_offset
+        if c in (2, 22, 32):
+            def_tags.append(encode_tag(c, remap_shape_bitmap_ids(c, b, id_offset)))
+        elif c == 39:
+            sfc = struct.unpack("<H", b[2:4])[0]
+            sub_chunks = []
+            for sc, sb in parse_tags(b, 4):
+                if sc in (12, 14, 15, 18, 19, 45):
+                    continue
+                if sc == 26 and (sb[0] & 0x02):
+                    ref_id = struct.unpack("<H", sb[3:5])[0] + id_offset
+                    sb = sb[:3] + struct.pack("<H", ref_id) + sb[5:]
+                elif sc == 70:
+                    _, _, _, ref_cid, _, cpos = parse_place3_info(sb)
+                    if ref_cid is not None and cpos is not None:
+                        sb = sb[:cpos] + struct.pack("<H", ref_cid + id_offset) + sb[cpos + 2 :]
+                sub_chunks.append(encode_tag(sc, sb))
+            def_tags.append(encode_tag(39, struct.pack("<HH", new_id, sfc) + b"".join(sub_chunks)))
+            last_sprite_cid = new_id
+        else:
+            def_tags.append(encode_tag(c, struct.pack("<H", new_id) + b[2:]))
+
+    return def_tags, (root_cid or last_sprite_cid), bg_w, bg_h
+
+
+def measure_skill_reach_px(skill_swf_path: str) -> float:
+    """
+    Measures the exact horizontal projectile travel distance (in stage px at CHAR_SCALE)
+    by scanning PlaceObject2/3 translation tx across the skill SWF's sprites.
+    """
+    def _read_tx(buf: bytes, pos: int) -> float:
+        bp = pos * 8
+        def rbits(n):
+            nonlocal bp
+            v = 0
+            for _ in range(n):
+                v = (v << 1) | ((buf[bp >> 3] >> (7 - (bp & 7))) & 1)
+                bp += 1
+            return v
+        def rsbits(n):
+            v = rbits(n)
+            if n > 0 and (v & (1 << (n - 1))):
+                v -= (1 << n)
+            return v
+        if rbits(1):
+            nb = rbits(5); rsbits(nb); rsbits(nb)
+        if rbits(1):
+            nb = rbits(5); rsbits(nb); rsbits(nb)
+        nb = rbits(5)
+        return rsbits(nb) / 20.0
+
+    try:
+        d = decompress_swf(skill_swf_path)
+        _, _, _, ts = parse_header(d)
+        min_tx = 0.0
+        for c, b in parse_tags(d, ts):
+            if c == 39:
+                for sc, sb_b in parse_tags(b, 4):
+                    if sc == 26 and (sb_b[0] & 0x04):
+                        off = 3 + (2 if (sb_b[0] & 0x02) else 0)
+                        tx = _read_tx(sb_b, off)
+                        if tx < min_tx:
+                            min_tx = tx
+                    elif sc == 70 and (sb_b[0] & 0x04):
+                        off = 4 + (2 if (sb_b[0] & 0x02) else 0)
+                        tx = _read_tx(sb_b, off)
+                        if tx < min_tx:
+                            min_tx = tx
+        reach = -min_tx * CHAR_SCALE
+        if reach >= 100.0:
+            return min(340.0, reach)
+    except Exception:
+        pass
+    return 205.0
 
 
 def cmd_build_battle(
@@ -941,6 +1321,7 @@ def cmd_build_battle(
     weapon: str,
     back: str,
     skills_csv: str,
+    bg_swf_path: str = "",
 ):
     """
     Builds ONE unified 36 FPS Battle Stage SWF containing:
@@ -1011,9 +1392,9 @@ def cmd_build_battle(
         raise ValueError("No enemy SWF paths provided")
 
     FORMATION_POS = {
-        1: [(615.0, 280.0)],
-        2: [(585.0, 232.0), (645.0, 305.0)],
-        3: [(590.0, 215.0), (655.0, 272.0), (580.0, 322.0)],
+        1: [(630.0, 255.0)],
+        2: [(630.0, 200.0), (630.0, 298.0)],
+        3: [(630.0, 168.0), (630.0, 244.0), (630.0, 320.0)],
     }
     slot_positions = FORMATION_POS[len(enemy_paths)]
 
@@ -1087,9 +1468,14 @@ def cmd_build_battle(
         unique_enemy_meta[ep] = (base_cid, base_cid + 1, base_cid + 2, base_cid + 3, max(22, e_atk_dur))
         unique_idx += 1
 
+    # Optional Mission Backdrop SWF (placed at BG_DEPTH = 1 on Frame 1, never removed!)
+    BG_DEPTH = 1
+    bg_def_tags, bg_cid, bg_w, bg_h = load_mission_bg_defs(bg_swf_path, id_offset=45000)
+    out_tags.extend(bg_def_tags)
+
     # Per-slot enemy wrapper sprites (850 + idx): placed ONCE on Root Frame 1 with instance name "e0", "e1", "e2"
     # Root timeline NEVER places/removes enemy depths again, so forward GotoFrame NEVER mutates other enemies!
-    PLAYER_DEPTH = 5
+    PLAYER_DEPTH = 6
     enemy_slots = []
     for idx, ep in enumerate(enemy_paths):
         sb_cid, atk_cid, hit_cid, dead_cid, atk_dur = unique_enemy_meta[ep]
@@ -1099,7 +1485,7 @@ def cmd_build_battle(
         enemy_slots.append({
             "idx": idx,
             "name": f"e{idx}",
-            "depth": idx + 1,
+            "depth": idx + 2,
             "actor_depth": 10 + idx,  # temporary clip depth used during this enemy's dash/attack
             "wrapper_cid": wrapper_cid,
             "tx": tx,
@@ -1111,8 +1497,8 @@ def cmd_build_battle(
             "atk_dur": atk_dur,
         })
 
-    # Load skill melee/ranged metadata from public/game_data/skills.json
-    skill_is_melee = {}
+    # Load skill cast mode (melee / ranged / self) from public/game_data/skills.json
+    skill_cast_mode = {}
     skills_json_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "public",
@@ -1125,13 +1511,20 @@ def cmd_build_battle(
                 for sk_obj in json.load(sf):
                     sk_id_key = str(sk_obj.get("id", ""))
                     hit_pos = str(sk_obj.get("attack_hit_position") or "").lower()
-                    skill_is_melee[sk_id_key] = hit_pos.startswith("meele") or hit_pos.startswith("melee")
+                    sk_target = str(sk_obj.get("target") or "").lower()
+                    if sk_target == "self":
+                        skill_cast_mode[sk_id_key] = "self"
+                    elif hit_pos.startswith("meele") or hit_pos.startswith("melee"):
+                        skill_cast_mode[sk_id_key] = "melee"
+                    else:
+                        # Projectile / ranged skills (range_1, range_2, startpos offensive like Fireball & Water Burst)
+                        skill_cast_mode[sk_id_key] = "ranged"
         except Exception:
             pass
 
     # 3) Equipped Skills (up to 6 skills, dressed with player equipment!)
     skill_ids = [s.strip() for s in skills_csv.split(",") if s.strip()][:6]
-    skill_entries = []  # (seq_key, skill_sid, skill_fc, is_melee)
+    skill_entries = []  # (seq_key, skill_sid, skill_fc, cast_mode, cast_offset_x)
     for idx, sk_id in enumerate(skill_ids):
         sk_file = os.path.join(skills_dir, sk_id if sk_id.endswith(".swf") else f"{sk_id}.swf")
         if not os.path.isfile(sk_file):
@@ -1142,8 +1535,10 @@ def cmd_build_battle(
         out_tags.extend(s_defs)
         if s_main_sid is not None:
             clean_key = sk_id.replace(".swf", "")
-            is_melee = skill_is_melee.get(clean_key, clean_key in ("skill_01", "skill_12"))
-            skill_entries.append((clean_key, s_main_sid, max(20, s_fc), is_melee))
+            default_mode = "melee" if clean_key in ("skill_01", "skill_12") else "ranged"
+            c_mode = skill_cast_mode.get(clean_key, default_mode)
+            c_off = measure_skill_reach_px(sk_file) if c_mode == "ranged" else 58.0
+            skill_entries.append((clean_key, s_main_sid, max(20, s_fc), c_mode, c_off))
 
     # 4) Plan Root Timeline Frame Segments
     # Frame 1: Initial Battle Setup (clears all depths, places ALL enemies in standby)
@@ -1166,11 +1561,12 @@ def cmd_build_battle(
         hit_offset: int,
         slot_idx: int = 0,
         skill_cid: int = 0,
-        is_melee: bool = False,
+        cast_mode: str = "melee",  # "melee" | "ranged" | "self"
+        cast_offset_x: float = 58.0,
         is_kill: bool = False,
     ):
         nonlocal cur_frame
-        has_dash = kind in ("player_atk", "enemy_atk") or (kind == "player_skill" and is_melee)
+        has_dash = kind in ("player_atk", "enemy_atk") or (kind == "player_skill" and cast_mode in ("melee", "ranged"))
         dash_in = DASH_IN_FRAMES if has_dash else 0
         # On enemy_atk_kill (player dies), battle ends so no dash-out needed
         end_stop = (kind == "player_win") or (kind == "enemy_atk" and is_kill)
@@ -1194,7 +1590,8 @@ def cmd_build_battle(
             "hit_frame": act_start + max(1, min(act_duration - 2, hit_offset)),
             "slot_idx": slot_idx,
             "skill_cid": skill_cid,
-            "is_melee": is_melee,
+            "cast_mode": cast_mode,
+            "cast_offset_x": cast_offset_x,
             "is_kill": is_kill,
             "end_stop": end_stop,
         })
@@ -1203,25 +1600,25 @@ def cmd_build_battle(
     p_atk_len = max(22, p_atk_dur)
     p_chg_len = max(22, p_chg_dur)
 
-    register_seq("player_charge", "player_charge", p_chg_len, 10)
-    register_seq("player_win", "player_win", 20, 2)
+    register_seq("player_charge", "player_charge", p_chg_len, 10, cast_mode="self")
+    register_seq("player_win", "player_win", 20, 2, cast_mode="self")
 
     for sl in enemy_slots:
         t = sl["idx"]
-        register_seq(f"p_atk_t{t}", "player_atk", p_atk_len, 12, slot_idx=t, is_melee=True, is_kill=False)
-        register_seq(f"p_atk_t{t}_kill", "player_atk", p_atk_len, 12, slot_idx=t, is_melee=True, is_kill=True)
-        register_seq(f"e_atk_s{t}", "enemy_atk", sl["atk_dur"], 12, slot_idx=t, is_melee=True, is_kill=False)
-        register_seq(f"e_atk_s{t}_kill", "enemy_atk", sl["atk_dur"], 12, slot_idx=t, is_melee=True, is_kill=True)
+        register_seq(f"p_atk_t{t}", "player_atk", p_atk_len, 12, slot_idx=t, cast_mode="melee", is_kill=False)
+        register_seq(f"p_atk_t{t}_kill", "player_atk", p_atk_len, 12, slot_idx=t, cast_mode="melee", is_kill=True)
+        register_seq(f"e_atk_s{t}", "enemy_atk", sl["atk_dur"], 12, slot_idx=t, cast_mode="melee", is_kill=False)
+        register_seq(f"e_atk_s{t}_kill", "enemy_atk", sl["atk_dur"], 12, slot_idx=t, cast_mode="melee", is_kill=True)
 
-        for sk_key, sk_sid, sk_fc, is_melee in skill_entries:
+        for sk_key, sk_sid, sk_fc, c_mode, c_off in skill_entries:
             hit_off = max(10, int(sk_fc * 0.58))
             register_seq(
                 f"skill_{sk_key}_t{t}", "player_skill", sk_fc, hit_off,
-                slot_idx=t, skill_cid=sk_sid, is_melee=is_melee, is_kill=False
+                slot_idx=t, skill_cid=sk_sid, cast_mode=c_mode, cast_offset_x=c_off, is_kill=False
             )
             register_seq(
                 f"skill_{sk_key}_t{t}_kill", "player_skill", sk_fc, hit_off,
-                slot_idx=t, skill_cid=sk_sid, is_melee=is_melee, is_kill=True
+                slot_idx=t, skill_cid=sk_sid, cast_mode=c_mode, cast_offset_x=c_off, is_kill=True
             )
 
     total_root_frames = cur_frame - 1
@@ -1232,6 +1629,19 @@ def cmd_build_battle(
 
     for f in range(1, IDLE_FRAMES + 1):
         if f == 1:
+            # Place Mission Background ONCE at BG_DEPTH = 1 (cover-scaled to 760x360)
+            if bg_cid is not None:
+                bg_sx = ARENA_W / float(bg_w)
+                bg_sy = ARENA_H / float(bg_h)
+                bg_scale = max(bg_sx, bg_sy)
+                bg_tx = (ARENA_W - bg_w * bg_scale) / 2.0
+                bg_ty = (ARENA_H - bg_h * bg_scale) / 2.0
+                out_tags.append(
+                    encode_place_object2(
+                        BG_DEPTH, bg_cid, bg_tx, bg_ty,
+                        bg_scale, bg_scale, move=False, name="bg"
+                    )
+                )
             # Initial boot: place ALL enemy wrapper clips ONCE with names "e0", "e1", "e2"
             for sl in enemy_slots:
                 out_tags.append(
@@ -1261,7 +1671,9 @@ def cmd_build_battle(
         sl = enemy_slots[seq["slot_idx"]]
         e_name = sl["name"]
         e_tx, e_ty = sl["tx"], sl["ty"]
-        p_melee_tx = e_tx - 105.0
+        # Use exact auto-measured projectile reach per skill (e.g. 220px for Water Burst / Fireball, 135px for Wind Cannon)
+        cast_offset_x = float(seq.get("cast_offset_x", 58.0))
+        p_melee_tx = e_tx - cast_offset_x
         p_melee_ty = e_ty
 
         start_f = seq["start"]
@@ -1416,16 +1828,80 @@ def cmd_build_battle(
         f.write(swf_bytes)
 
 
+VILLAGE_BUTTON_SCREEN_MAP = {
+    61: "missions",      # btn_MissionRoom
+    66: "academy",       # btn_Scroll_Academy
+    80: "inventory",     # btn_Scroll_Shop
+    95: "headquarter",   # btn_Headquarter
+    106: "pvp",          # btn_Scroll_Arena
+    134: "pvp",          # btn_Arena
+    144: "hunting",      # btn_Scroll_Hunting
+    160: "talent",       # btn_TalentShop
+    166: "petShop",      # btn_Scroll_Pet
+    26: "senjutsu",      # btn_Scroll_Senjutsu
+    174: "forge",        # btn_Scroll_Battle (Blacksmith / Forge)
+    133: "myJutsu",      # btn_Encyclopedia
+    151: "stats",        # btn_Recruit
+}
+
+
+def inject_button2_release_action(body: bytes, js_fn_name: str) -> bytes:
+    """
+    Appends a native AVM1 on(release) BUTTONCONDACTION to an actionless DefineButton2 tag
+    so clicking the original Flash building directly triggers ExternalInterface.call(js_fn_name).
+    """
+    action_offset = len(body) - 3
+    cond_block = struct.pack("<H", 0) + bytes([0x08, 0x00]) + avm1_notify_js(js_fn_name)
+    return body[:3] + struct.pack("<H", action_offset) + body[5:] + cond_block
+
+
+def cmd_extract_village_map(ninja_sage_swf: str, output_path: str):
+    """Extracts the original Panels.Village (cid=176, 1920x1080) from NinjaSage.swf with native clickable buildings."""
+    data = decompress_swf(ninja_sage_swf)
+    version, fps_fixed, _, tag_start = parse_header(data)
+    tags = parse_tags(data, tag_start)
+
+    out_tags = [encode_tag(69, b"\x20\x00\x00\x00")]
+    out_tags.append(encode_tag(9, bytes([0x78, 0xC2, 0xE8])))  # Sky blue fallback BG
+
+    # Collect all definition tags referenced by Panels.Village (cid 1..176)
+    for code, body in tags:
+        if code in (0, 1, 9, 26, 28, 69, 70, 76, 82):
+            continue
+        if len(body) >= 2:
+            cid = struct.unpack("<H", body[:2])[0]
+            if 1 <= cid <= 176:
+                if code == 34 and cid in VILLAGE_BUTTON_SCREEN_MAP:
+                    screen = VILLAGE_BUTTON_SCREEN_MAP[cid]
+                    body = inject_button2_release_action(body, f"__onVillage_{screen}")
+                out_tags.append(encode_tag(code, body))
+
+    # Place Panels.Village (cid=176) at origin (0, 0) on the original 1920x1080 stage
+    out_tags.append(encode_place_object2(1, 176, 0.0, 0.0, 1.0, 1.0, name="village"))
+    out_tags.append(encode_tag(1, b""))
+    out_tags.append(encode_tag(0, b""))
+
+    rect = encode_rect(0, 1920, 0, 1080)
+    swf_bytes = build_swf(version, rect, fps_fixed, 1, b"".join(out_tags))
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "wb") as f:
+        f.write(swf_bytes)
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(1)
     mode = sys.argv[1]
     if mode == "extract-player-base":
         cmd_extract_player_base(sys.argv[2], sys.argv[3])
+    elif mode == "extract-village-map":
+        cmd_extract_village_map(sys.argv[2], sys.argv[3])
     elif mode == "build-entity":
         cmd_build_entity(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else "standby")
     elif mode == "build-skill":
         cmd_build_skill(sys.argv[2], sys.argv[3])
+    elif mode == "build-skill-icons":
+        cmd_build_skill_icons(sys.argv[2], sys.argv[3], sys.argv[4])
     elif mode == "build-player-skill":
         cmd_build_player_skill(
             sys.argv[2],
@@ -1448,6 +1924,8 @@ def main():
             sys.argv[8],
             sys.argv[9],
             sys.argv[10],
+            sys.argv[11] if len(sys.argv) > 11 else "",
+            sys.argv[12] if len(sys.argv) > 12 else "",
         )
     elif mode == "build-battle":
         cmd_build_battle(
@@ -1462,6 +1940,7 @@ def main():
             sys.argv[10],
             sys.argv[11],
             sys.argv[12] if len(sys.argv) > 12 else "skill_01",
+            sys.argv[13] if len(sys.argv) > 13 else "",
         )
     else:
         raise ValueError(f"Unknown mode: {mode}")

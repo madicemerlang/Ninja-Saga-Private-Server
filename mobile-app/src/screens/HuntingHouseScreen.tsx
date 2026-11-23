@@ -11,6 +11,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { MobileApiClient } from '../api/client';
 import { loadLibraryData, type LibraryItemDef } from '../api/gameData';
 import { playClickSfx } from '../audio/audioManager';
+import { BUILDING_BGS } from '../components/BuildingSceneBackdrop';
+import { NinjaScrollWindow, NS_THEME } from '../components/NinjaScrollWindow';
 import { buildSwfAssetUrl } from '../config/env';
 import { RuffleStageView, type RuffleStageHandle } from '../stage/RuffleStageView';
 import { useAuthStore } from '../store/useAuthStore';
@@ -174,14 +176,18 @@ export function HuntingHouseScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.root}>
-      <View style={styles.header}>
-        <Pressable style={styles.backBtn} onPress={() => { playClickSfx(serverUrl); navigate('hub'); }}>
-          <Text style={styles.backText}>← Village Hub</Text>
-        </Pressable>
-        <Text style={styles.title}>🏹 Hunting House</Text>
+    <NinjaScrollWindow
+      title="Hunting House"
+      bgSource={BUILDING_BGS.huntingHouse}
+      onClose={() => {
+        playClickSfx(serverUrl);
+        navigate('hub');
+      }}
+      rightContent={
         <View style={styles.badgeRow}>
-          <Text style={styles.badgeCount}>🏅 Kari Badges: {badges}</Text>
+          <View style={styles.badgePill}>
+            <Text style={styles.badgeCount}>🏅 Kari Badges: {badges}</Text>
+          </View>
           <Pressable
             style={[styles.claimBtn, (dailyClaimed || busy !== null) && styles.disabledBtn]}
             disabled={dailyClaimed || busy !== null}
@@ -190,7 +196,8 @@ export function HuntingHouseScreen() {
             <Text style={styles.claimText}>{dailyClaimed ? 'Claimed ✓' : 'Daily Badge'}</Text>
           </Pressable>
         </View>
-      </View>
+      }
+    >
 
       {message && (
         <View style={styles.banner}>
@@ -287,51 +294,61 @@ export function HuntingHouseScreen() {
           )}
         </View>
       </View>
-    </SafeAreaView>
+    </NinjaScrollWindow>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#070E1A', padding: 10 },
-  header: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: '#0F172A', borderRadius: 10, borderWidth: 1, borderColor: '#1E293B',
-    paddingHorizontal: 10, paddingVertical: 7, marginBottom: 8,
+  badgeRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  badgePill: {
+    backgroundColor: '#3E2008', borderRadius: 8, borderWidth: 1.5, borderColor: NS_THEME.goldTrim,
+    paddingHorizontal: 9, paddingVertical: 4,
   },
-  backBtn: { backgroundColor: '#1E293B', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6 },
-  backText: { color: '#F8FAFC', fontSize: 11, fontWeight: '700' },
-  title: { color: '#F8FAFC', fontSize: 14, fontWeight: '800' },
-  badgeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  badgeCount: { color: '#FACC15', fontSize: 11, fontWeight: '800' },
-  claimBtn: { backgroundColor: '#16A34A', paddingHorizontal: 9, paddingVertical: 4, borderRadius: 6 },
+  badgeCount: { color: '#FDE047', fontSize: 10.5, fontWeight: '900' },
+  claimBtn: {
+    backgroundColor: NS_THEME.btnGreen, borderWidth: 1.5, borderColor: NS_THEME.woodBorderDark,
+    paddingHorizontal: 9, paddingVertical: 4, borderRadius: 6,
+  },
   disabledBtn: { opacity: 0.45 },
-  claimText: { color: '#FFF', fontSize: 10, fontWeight: '800' },
+  claimText: { color: '#FFF', fontSize: 10, fontWeight: '900' },
   banner: {
-    backgroundColor: '#1E293B', borderColor: '#F59E0B', borderWidth: 1,
-    borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, marginBottom: 6,
+    backgroundColor: '#FEF3C7', borderColor: '#B45309', borderWidth: 1.5,
+    borderRadius: 7, paddingHorizontal: 10, paddingVertical: 5, marginBottom: 6,
   },
-  bannerText: { color: '#FDE68A', fontSize: 11, fontWeight: '700' },
+  bannerText: { color: '#78350F', fontSize: 11, fontWeight: '800' },
   body: { flex: 1, flexDirection: 'row', gap: 10 },
   previewCard: {
-    width: 230, backgroundColor: '#0F172A', borderRadius: 10,
-    borderWidth: 1, borderColor: '#1E293B', padding: 8,
+    width: 225, backgroundColor: NS_THEME.parchmentCard, borderRadius: 10,
+    borderWidth: 1.5, borderColor: NS_THEME.woodBorder, padding: 8,
   },
-  previewTitle: { color: '#F8FAFC', fontSize: 13, fontWeight: '800', marginBottom: 4 },
-  stageBox: { height: 155, backgroundColor: '#111827', borderRadius: 8, overflow: 'hidden' },
-  previewDesc: { color: '#CBD5E1', fontSize: 10, marginTop: 6 },
-  listPane: { flex: 1, backgroundColor: '#0F172A', borderRadius: 10, borderWidth: 1, borderColor: '#1E293B', padding: 8 },
+  previewTitle: { color: NS_THEME.inkDark, fontSize: 13, fontWeight: '900', marginBottom: 4 },
+  stageBox: {
+    height: 150, backgroundColor: NS_THEME.stageDark, borderRadius: 8,
+    borderWidth: 1.5, borderColor: NS_THEME.woodBorder, overflow: 'hidden',
+  },
+  previewDesc: { color: NS_THEME.inkMid, fontSize: 10, fontWeight: '600', marginTop: 6 },
+  listPane: {
+    flex: 1, backgroundColor: NS_THEME.parchmentCardAlt, borderRadius: 10,
+    borderWidth: 1.5, borderColor: NS_THEME.woodBorder, padding: 8,
+  },
   tabRow: { flexDirection: 'row', gap: 6, marginBottom: 8 },
-  tabBtn: { backgroundColor: '#1E293B', paddingHorizontal: 12, paddingVertical: 5, borderRadius: 6 },
-  tabActive: { backgroundColor: '#DC2626' },
-  tabText: { color: '#FFF', fontSize: 11, fontWeight: '800' },
+  tabBtn: {
+    backgroundColor: NS_THEME.tabInactive, borderWidth: 1.5, borderColor: NS_THEME.woodBorder,
+    paddingHorizontal: 12, paddingVertical: 5, borderRadius: 6,
+  },
+  tabActive: { backgroundColor: NS_THEME.btnRed, borderColor: NS_THEME.woodBorderDark },
+  tabText: { color: '#FFF', fontSize: 11, fontWeight: '900' },
   scrollList: { gap: 6, paddingBottom: 14 },
   rowCard: {
-    flexDirection: 'row', alignItems: 'center', backgroundColor: '#111827',
-    borderRadius: 8, borderWidth: 1, borderColor: '#1E293B', padding: 8, gap: 8,
+    flexDirection: 'row', alignItems: 'center', backgroundColor: NS_THEME.parchmentCard,
+    borderRadius: 8, borderWidth: 1.5, borderColor: NS_THEME.woodBorder, padding: 8, gap: 8,
   },
-  rowSelected: { borderColor: '#F59E0B' },
-  rowTitle: { color: '#F8FAFC', fontSize: 12, fontWeight: '800' },
-  rowSub: { color: '#94A3B8', fontSize: 10, marginTop: 2 },
-  huntBtn: { backgroundColor: '#DC2626', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6 },
-  huntBtnText: { color: '#FFF', fontSize: 11, fontWeight: '800' },
+  rowSelected: { borderColor: NS_THEME.btnOrange, backgroundColor: NS_THEME.parchmentSelected, borderWidth: 2 },
+  rowTitle: { color: NS_THEME.inkDark, fontSize: 11.5, fontWeight: '900' },
+  rowSub: { color: NS_THEME.inkSoft, fontSize: 9.5, fontWeight: '700', marginTop: 2 },
+  huntBtn: {
+    backgroundColor: NS_THEME.btnRed, borderWidth: 1.5, borderColor: NS_THEME.woodBorderDark,
+    paddingHorizontal: 11, paddingVertical: 6, borderRadius: 6,
+  },
+  huntBtnText: { color: '#FFF', fontSize: 10.5, fontWeight: '900' },
 });

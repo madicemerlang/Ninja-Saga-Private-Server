@@ -45,12 +45,12 @@ class RegistrationService
         if (!$user) return ['status' => 0, 'error' => 'User not found.'];
 
         $characterCount = Character::where('user_id', $accountId)->count();
-        $maxCharacters = ($user->account_type == 1) ? 6 : 1;
+        $maxCharacters = ($user->account_type >= 1) ? 6 : 1;
 
         if ($characterCount >= $maxCharacters) {
             return [
                 'status' => 2,
-                'result' => ($user->account_type == 1)
+                'result' => ($user->account_type >= 1)
                     ? 'You have reached the maximum limit of 6 characters.'
                     : 'Free users can only create 1 character. Upgrade to Premium for 6 slots!'
             ];

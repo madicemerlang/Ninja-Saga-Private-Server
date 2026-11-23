@@ -159,6 +159,89 @@ class SwfAssetController extends Controller
         ]);
     }
 
+    public function villageMap(): BinaryFileResponse|JsonResponse
+    {
+        $cacheDir = storage_path('app/swf_cache');
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+        $cachedPath = $cacheDir . DIRECTORY_SEPARATOR . 'village_map_v2.swf';
+
+        if (!is_file($cachedPath)) {
+            $ninjaSageSwf = $this->basePath() . DIRECTORY_SEPARATOR . 'NinjaSage.swf';
+            $script = base_path('scripts/swf_builder.py');
+            if (!is_file($ninjaSageSwf) || !is_file($script)) {
+                return response()->json(['error' => 'NinjaSage.swf not found'], 404);
+            }
+            $cmd = sprintf(
+                'python3 %s extract-village-map %s %s 2>&1',
+                escapeshellarg($script),
+                escapeshellarg($ninjaSageSwf),
+                escapeshellarg($cachedPath)
+            );
+            shell_exec($cmd);
+        }
+
+        if (!is_file($cachedPath)) {
+            return response()->json(['error' => 'Failed compiling village map SWF'], 500);
+        }
+
+        return response()->file($cachedPath, [
+            'Content-Type' => 'application/x-shockwave-flash',
+            'Cache-Control' => 'public, max-age=86400',
+            'Access-Control-Allow-Origin' => '*',
+        ]);
+    }
+
+    public function iconSheet(string $category, Request $request): BinaryFileResponse|JsonResponse
+    {
+        if (!in_array($category, ['skills', 'items', 'materials', 'consumables', 'pets'], true)) {
+            return response()->json(['error' => 'Invalid icon category'], 404);
+        }
+
+        $idsRaw = (string) $request->query('ids', '');
+        $ids = array_slice(array_values(array_filter(array_map(
+            static fn ($s) => preg_replace('/[^a-zA-Z0-9_-]/', '', trim($s)),
+            explode(',', $idsRaw)
+        ))), 0, 12);
+
+        if (empty($ids)) {
+            return response()->json(['error' => 'No asset IDs provided'], 400);
+        }
+
+        $assetDir = $this->basePath() . DIRECTORY_SEPARATOR . $category;
+        $script = base_path('scripts/swf_builder.py');
+        $cacheDir = storage_path('app/swf_cache');
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+
+        $csv = implode(',', $ids);
+        $hash = substr(md5("{$category}|{$csv}|v2"), 0, 12);
+        $cachedPath = $cacheDir . DIRECTORY_SEPARATOR . "icons_{$category}_{$hash}.swf";
+
+        if (!is_file($cachedPath)) {
+            $cmd = sprintf(
+                'python3 %s build-skill-icons %s %s %s 2>&1',
+                escapeshellarg($script),
+                escapeshellarg($assetDir),
+                escapeshellarg($csv),
+                escapeshellarg($cachedPath)
+            );
+            shell_exec($cmd);
+        }
+
+        if (!is_file($cachedPath)) {
+            return response()->json(['error' => 'Failed compiling icon sheet SWF'], 500);
+        }
+
+        return response()->file($cachedPath, [
+            'Content-Type' => 'application/x-shockwave-flash',
+            'Cache-Control' => 'public, max-age=86400',
+            'Access-Control-Allow-Origin' => '*',
+        ]);
+    }
+
     public function player(int $charId, Request $request): BinaryFileResponse|JsonResponse
     {
         $anim = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $request->query('anim', 'standby')) ?: 'standby';
@@ -166,10 +249,11 @@ class SwfAssetController extends Controller
 
         $gender = (int) ($char?->gender ?? 0);
         $gSuffix = $gender === 0 ? '_0' : '_1';
-        $hair = (string) ($char?->hair_style ?: "hair_01{$gSuffix}");
-        $clothing = (string) ($char?->equipment_clothing ?: "set_01{$gSuffix}");
-        $weapon = (string) ($char?->equipment_weapon ?: 'wpn_01');
-        $back = (string) ($char?->equipment_back ?: 'back_01');
+        $cleanId = static fn (?string $v): string => preg_replace('/[^a-zA-Z0-9_-]/', '', (string) $v) ?? '';
+        $hair = $cleanId($request->query('hair')) ?: (string) ($char?->hair_style ?: "hair_01{$gSuffix}");
+        $clothing = $cleanId($request->query('clothing')) ?: (string) ($char?->equipment_clothing ?: "set_01{$gSuffix}");
+        $weapon = $cleanId($request->query('weapon')) ?: (string) ($char?->equipment_weapon ?: 'wpn_01');
+        $back = $cleanId($request->query('back')) ?: (string) ($char?->equipment_back ?: 'back_01');
 
         $baseSwf = storage_path('app/swf_base/player_base.swf');
         $script = base_path('scripts/swf_builder.py');
@@ -192,7 +276,21 @@ class SwfAssetController extends Controller
             return response()->json(['error' => 'player_base.swf could not be initialized'], 500);
         }
 
-        $equipHash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}"), 0, 12);
+        $portraitMode = filter_var($request->query('portrait', false), FILTER_VALIDATE_BOOLEAN);
+        $bgName = $cleanId($request->query('bg'));
+        $bgPath = '';
+        if ($portraitMode) {
+            $bgPath = '__portrait__';
+        } elseif ($bgName !== '') {
+            $candBg = $this->basePath() . DIRECTORY_SEPARATOR . 'mission' . DIRECTORY_SEPARATOR . $bgName . '.swf';
+            if (is_file($candBg)) {
+                $bgPath = $candBg;
+            }
+        }
+
+        $hairColor = preg_replace('/[^0-9|]/', '', (string) ($request->query('hair_color') ?: $char?->hair_color ?: '0|0')) ?? '0|0';
+        $modeTag = $portraitMode ? 'portrait' : $bgName;
+        $equipHash = substr(md5("{$gender}|{$hair}|{$hairColor}|{$clothing}|{$weapon}|{$back}|{$modeTag}|v25"), 0, 12);
         $cacheDir = storage_path('app/swf_cache');
         if (!is_dir($cacheDir)) {
             @mkdir($cacheDir, 0775, true);
@@ -201,7 +299,7 @@ class SwfAssetController extends Controller
 
         if (!is_file($cachedPath)) {
             $cmd = sprintf(
-                'python3 %s build-player %s %s %s %s %d %s %s %s %s 2>&1',
+                'python3 %s build-player %s %s %s %s %d %s %s %s %s %s %s 2>&1',
                 escapeshellarg($script),
                 escapeshellarg($baseSwf),
                 escapeshellarg($itemsDir),
@@ -211,7 +309,9 @@ class SwfAssetController extends Controller
                 escapeshellarg($hair),
                 escapeshellarg($clothing),
                 escapeshellarg($weapon),
-                escapeshellarg($back)
+                escapeshellarg($back),
+                escapeshellarg($bgPath),
+                escapeshellarg($hairColor)
             );
             shell_exec($cmd);
         }
@@ -222,7 +322,7 @@ class SwfAssetController extends Controller
 
         return response()->file($cachedPath, [
             'Content-Type' => 'application/x-shockwave-flash',
-            'Cache-Control' => 'no-cache, public',
+            'Cache-Control' => 'public, max-age=86400',
             'Access-Control-Allow-Origin' => '*',
         ]);
     }
@@ -299,11 +399,20 @@ class SwfAssetController extends Controller
         $char = Character::find($charId);
         $gender = (int) ($char?->gender ?? 0);
         $gSuffix = $gender === 0 ? '_0' : '_1';
-        $hair = (string) ($char?->hair_style ?: "hair_01{$gSuffix}");
-        $clothing = (string) ($char?->equipment_clothing ?: "set_01{$gSuffix}");
-        $weapon = (string) ($char?->equipment_weapon ?: 'wpn_01');
-        $back = (string) ($char?->equipment_back ?: 'back_01');
+        $cleanId = static fn (?string $v): string => preg_replace('/[^a-zA-Z0-9_-]/', '', (string) $v) ?? '';
+        $hair = $cleanId($request->query('hair')) ?: (string) ($char?->hair_style ?: "hair_01{$gSuffix}");
+        $clothing = $cleanId($request->query('clothing')) ?: (string) ($char?->equipment_clothing ?: "set_01{$gSuffix}");
+        $weapon = $cleanId($request->query('weapon')) ?: (string) ($char?->equipment_weapon ?: 'wpn_01');
+        $back = $cleanId($request->query('back')) ?: (string) ($char?->equipment_back ?: 'back_01');
         $skillsCsv = (string) ($request->query('skills') ?: $char?->equipment_skills ?: 'skill_01');
+        $bgName = preg_replace('/[^a-zA-Z0-9_-]/', '', (string) $request->query('bg', ''));
+        $bgPath = '';
+        if ($bgName !== '') {
+            $candidateBg = $this->basePath() . DIRECTORY_SEPARATOR . 'mission' . DIRECTORY_SEPARATOR . $bgName . '.swf';
+            if (is_file($candidateBg)) {
+                $bgPath = $candidateBg;
+            }
+        }
 
         $baseSwf = storage_path('app/swf_base/player_base.swf');
         $script = base_path('scripts/swf_builder.py');
@@ -323,7 +432,7 @@ class SwfAssetController extends Controller
             }
         }
 
-        $hash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}|{$skillsCsv}"), 0, 12);
+        $hash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}|{$skillsCsv}|{$bgName}|v18"), 0, 12);
         $cacheDir = storage_path('app/swf_cache');
         if (!is_dir($cacheDir)) {
             @mkdir($cacheDir, 0775, true);
@@ -332,7 +441,7 @@ class SwfAssetController extends Controller
 
         if (!is_file($cachedPath)) {
             $cmd = sprintf(
-                'python3 %s build-battle %s %s %s %s %s %d %s %s %s %s %s 2>&1',
+                'python3 %s build-battle %s %s %s %s %s %d %s %s %s %s %s %s 2>&1',
                 escapeshellarg($script),
                 escapeshellarg($baseSwf),
                 escapeshellarg($itemsDir),
@@ -344,7 +453,8 @@ class SwfAssetController extends Controller
                 escapeshellarg($clothing),
                 escapeshellarg($weapon),
                 escapeshellarg($back),
-                escapeshellarg($skillsCsv)
+                escapeshellarg($skillsCsv),
+                escapeshellarg($bgPath)
             );
             shell_exec($cmd);
         }
@@ -360,7 +470,7 @@ class SwfAssetController extends Controller
         ]);
     }
 
-    public function playerSkill(int $charId, string $skillId): BinaryFileResponse|JsonResponse
+    public function playerSkill(int $charId, string $skillId, Request $request): BinaryFileResponse|JsonResponse
     {
         $skillName = preg_replace('/[^a-zA-Z0-9_-]/', '', pathinfo($skillId, PATHINFO_FILENAME));
         if (!$skillName) {
@@ -387,12 +497,13 @@ class SwfAssetController extends Controller
         $char = Character::find($charId);
         $gender = (int) ($char?->gender ?? 0);
         $gSuffix = $gender === 0 ? '_0' : '_1';
-        $hair = (string) ($char?->hair_style ?: "hair_01{$gSuffix}");
-        $clothing = (string) ($char?->equipment_clothing ?: "set_01{$gSuffix}");
-        $weapon = (string) ($char?->equipment_weapon ?: 'wpn_01');
-        $back = (string) ($char?->equipment_back ?: 'back_01');
+        $cleanId = static fn (?string $v): string => preg_replace('/[^a-zA-Z0-9_-]/', '', (string) $v) ?? '';
+        $hair = $cleanId($request->query('hair')) ?: (string) ($char?->hair_style ?: "hair_01{$gSuffix}");
+        $clothing = $cleanId($request->query('clothing')) ?: (string) ($char?->equipment_clothing ?: "set_01{$gSuffix}");
+        $weapon = $cleanId($request->query('weapon')) ?: (string) ($char?->equipment_weapon ?: 'wpn_01');
+        $back = $cleanId($request->query('back')) ?: (string) ($char?->equipment_back ?: 'back_01');
 
-        $equipHash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}"), 0, 12);
+        $equipHash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}|v19"), 0, 12);
         $cacheDir = storage_path('app/swf_cache');
         if (!is_dir($cacheDir)) {
             @mkdir($cacheDir, 0775, true);
@@ -423,6 +534,117 @@ class SwfAssetController extends Controller
         return response()->file($cachedPath, [
             'Content-Type' => 'application/x-shockwave-flash',
             'Cache-Control' => 'no-cache, public',
+            'Access-Control-Allow-Origin' => '*',
+        ]);
+    }
+
+    public function playerPreview(Request $request): BinaryFileResponse|JsonResponse
+    {
+        $gender = ((int) $request->query('gender', 0)) === 1 ? 1 : 0;
+        $gSuffix = $gender === 0 ? '_0' : '_1';
+        $cleanId = static fn (?string $v): string => preg_replace('/[^a-zA-Z0-9_-]/', '', (string) $v) ?? '';
+        $hairNum = max(1, min(30, (int) $request->query('hair_num', 1)));
+        $hairPad = str_pad((string) $hairNum, 2, '0', STR_PAD_LEFT);
+        $hair = $cleanId($request->query('hair')) ?: "hair_{$hairPad}{$gSuffix}";
+        $hairColor = preg_replace('/[^0-9|]/', '', (string) $request->query('hair_color', '0|0')) ?? '0|0';
+        $clothing = $cleanId($request->query('clothing')) ?: "set_01{$gSuffix}";
+        $weapon = $cleanId($request->query('weapon')) ?: 'wpn_01';
+        $back = $cleanId($request->query('back')) ?: 'back_01';
+
+        $baseSwf = storage_path('app/swf_base/player_base.swf');
+        $script = base_path('scripts/swf_builder.py');
+        $itemsDir = $this->basePath() . DIRECTORY_SEPARATOR . 'items';
+
+        if (!is_file($baseSwf)) {
+            $ninjaSageSwf = $this->basePath() . DIRECTORY_SEPARATOR . 'NinjaSage.swf';
+            if (is_file($ninjaSageSwf) && is_file($script)) {
+                shell_exec(sprintf(
+                    'python3 %s extract-player-base %s %s 2>&1',
+                    escapeshellarg($script),
+                    escapeshellarg($ninjaSageSwf),
+                    escapeshellarg($baseSwf)
+                ));
+            }
+        }
+
+        if (!is_file($baseSwf)) {
+            return response()->json(['error' => 'player_base.swf unavailable'], 500);
+        }
+
+        $hash = substr(md5("{$gender}|{$hair}|{$hairColor}|{$clothing}|{$weapon}|{$back}|preview|v22"), 0, 12);
+        $cacheDir = storage_path('app/swf_cache');
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+        $cachedPath = $cacheDir . DIRECTORY_SEPARATOR . "preview_{$hash}.swf";
+
+        if (!is_file($cachedPath)) {
+            shell_exec(sprintf(
+                'python3 %s build-player %s %s %s standby %d %s %s %s %s %s %s 2>&1',
+                escapeshellarg($script),
+                escapeshellarg($baseSwf),
+                escapeshellarg($itemsDir),
+                escapeshellarg($cachedPath),
+                $gender,
+                escapeshellarg($hair),
+                escapeshellarg($clothing),
+                escapeshellarg($weapon),
+                escapeshellarg($back),
+                escapeshellarg(''),
+                escapeshellarg($hairColor)
+            ));
+        }
+
+        if (!is_file($cachedPath)) {
+            return response()->json(['error' => 'Failed compiling preview SWF'], 500);
+        }
+
+        return response()->file($cachedPath, [
+            'Content-Type' => 'application/x-shockwave-flash',
+            'Cache-Control' => 'public, max-age=3600',
+            'Access-Control-Allow-Origin' => '*',
+        ]);
+    }
+
+    public function skillIcons(Request $request): BinaryFileResponse|JsonResponse
+    {
+        $rawSkills = (string) $request->query('skills', 'skill_01');
+        $cleanList = array_slice(array_filter(array_map(function ($s) {
+            return preg_replace('/[^a-zA-Z0-9_-]/', '', trim($s));
+        }, explode(',', $rawSkills))), 0, 6);
+
+        if (empty($cleanList)) {
+            $cleanList = ['skill_01'];
+        }
+        $skillsCsv = implode(',', $cleanList);
+        $hash = substr(md5($skillsCsv . '|v21'), 0, 12);
+
+        $cacheDir = storage_path('app/swf_cache');
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+        $cachedPath = $cacheDir . DIRECTORY_SEPARATOR . "skill_icons_{$hash}.swf";
+
+        if (!is_file($cachedPath)) {
+            $script = base_path('scripts/swf_builder.py');
+            $skillsDir = $this->basePath() . DIRECTORY_SEPARATOR . 'skills';
+            $cmd = sprintf(
+                'python3 %s build-skill-icons %s %s %s 2>&1',
+                escapeshellarg($script),
+                escapeshellarg($skillsDir),
+                escapeshellarg($skillsCsv),
+                escapeshellarg($cachedPath)
+            );
+            shell_exec($cmd);
+        }
+
+        if (!is_file($cachedPath)) {
+            return response()->json(['error' => 'Failed compiling skill icons SWF'], 500);
+        }
+
+        return response()->file($cachedPath, [
+            'Content-Type' => 'application/x-shockwave-flash',
+            'Cache-Control' => 'public, max-age=3600',
             'Access-Control-Allow-Origin' => '*',
         ]);
     }

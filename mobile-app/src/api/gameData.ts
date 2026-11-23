@@ -29,6 +29,8 @@ export interface SkillDef {
   price_tokens: number;
   buyable: boolean;
   type: string;
+  target?: 'Single' | 'All' | 'Self' | string;
+  hit_chance?: number;
 }
 
 export interface RawSkillEffectDef {

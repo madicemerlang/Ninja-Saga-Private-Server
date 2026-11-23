@@ -81,4 +81,12 @@ class PetService
     {
         return $this->managementService->renamePet($charIdOrParams, $sessionKey, $petId, $newName);
     }
+
+    /**
+     * learnPetSkill
+     */
+    public function learnPetSkill($params)
+    {
+        return $this->managementService->learnPetSkill($params);
+    }
 }

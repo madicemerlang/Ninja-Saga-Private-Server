@@ -8,10 +8,11 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { MobileApiClient, type BlacksmithRecipeDef } from '../api/client';
 import { loadLibraryData, type LibraryItemDef } from '../api/gameData';
 import { playClickSfx } from '../audio/audioManager';
+import { BUILDING_BGS } from '../components/BuildingSceneBackdrop';
+import { NinjaScrollWindow, NS_THEME } from '../components/NinjaScrollWindow';
 import { useAuthStore } from '../store/useAuthStore';
 
 export function ForgeScreen() {
@@ -86,17 +87,21 @@ export function ForgeScreen() {
   }, [recipes, itemsById, search]);
 
   return (
-    <SafeAreaView style={styles.root}>
-      <View style={styles.header}>
-        <Pressable style={styles.backBtn} onPress={() => { playClickSfx(serverUrl); navigate('hub'); }}>
-          <Text style={styles.backText}>← Village Hub</Text>
-        </Pressable>
-        <Text style={styles.title}>⚒️ Blacksmith Forge ({Object.keys(recipes).length} Recipes)</Text>
-        <Text style={styles.currency}>
-          Gold: {(profile?.gold ?? 0).toLocaleString()} • Tokens: {(profile?.tokens ?? 0).toLocaleString()}
-        </Text>
-      </View>
-
+    <NinjaScrollWindow
+      title="Blacksmith"
+      bgSource={BUILDING_BGS.blacksmith}
+      onClose={() => {
+        playClickSfx(serverUrl);
+        navigate('hub');
+      }}
+      rightContent={
+        <View style={styles.currencyPill}>
+          <Text style={styles.currencyTxt}>
+            🪙 {(profile?.gold ?? 0).toLocaleString()} • 💎 {(profile?.tokens ?? 0).toLocaleString()}
+          </Text>
+        </View>
+      }
+    >
       {message && (
         <View style={styles.banner}>
           <Text style={styles.bannerText}>{message}</Text>
@@ -105,14 +110,14 @@ export function ForgeScreen() {
 
       <TextInput
         style={styles.searchInput}
-        placeholder="Cari senjata / item forge..."
-        placeholderTextColor="#64748B"
+        placeholder="Cari senjata / resep forge..."
+        placeholderTextColor={NS_THEME.inkSoft}
         value={search}
         onChangeText={setSearch}
       />
 
       {loading ? (
-        <ActivityIndicator color="#F59E0B" style={{ marginTop: 24 }} />
+        <ActivityIndicator color={NS_THEME.btnOrange} style={{ marginTop: 24 }} />
       ) : (
         <ScrollView contentContainerStyle={styles.list}>
           {entries.map(([outId, rec]) => {
@@ -124,7 +129,7 @@ export function ForgeScreen() {
               <View key={outId} style={styles.card}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.itemTitle}>
-                    {outMeta?.name ?? outId} {outMeta?.level ? `(Lv.${outMeta.level})` : ''}{' '}
+                    ⚒️ {outMeta?.name ?? outId} {outMeta?.level ? `(Lv.${outMeta.level})` : ''}{' '}
                     {outMeta?.damage ? `• DMG ${outMeta.damage}` : ''}
                   </Text>
                   {reqWpn ? (
@@ -145,7 +150,7 @@ export function ForgeScreen() {
 
                 <View style={styles.btnCol}>
                   <Pressable
-                    style={[styles.forgeBtn, { backgroundColor: '#D97706' }]}
+                    style={[styles.forgeBtn, { backgroundColor: NS_THEME.btnOrange }]}
                     disabled={busyId !== null}
                     onPress={() => handleForge(outId, 'gold')}
                   >
@@ -154,7 +159,7 @@ export function ForgeScreen() {
                     </Text>
                   </Pressable>
                   <Pressable
-                    style={[styles.forgeBtn, { backgroundColor: '#7C3AED' }]}
+                    style={[styles.forgeBtn, { backgroundColor: NS_THEME.btnPurple }]}
                     disabled={busyId !== null}
                     onPress={() => handleForge(outId, 'tokens')}
                   >
@@ -168,42 +173,67 @@ export function ForgeScreen() {
           })}
         </ScrollView>
       )}
-    </SafeAreaView>
+    </NinjaScrollWindow>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#070E1A', padding: 10 },
-  header: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: '#0F172A', borderRadius: 10, borderWidth: 1, borderColor: '#1E293B',
-    paddingHorizontal: 10, paddingVertical: 7, marginBottom: 8,
+  currencyPill: {
+    backgroundColor: '#3E2008',
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.goldTrim,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
   },
-  backBtn: { backgroundColor: '#1E293B', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6 },
-  backText: { color: '#F8FAFC', fontSize: 11, fontWeight: '700' },
-  title: { color: '#F8FAFC', fontSize: 14, fontWeight: '800' },
-  currency: { color: '#FACC15', fontSize: 11, fontWeight: '700' },
+  currencyTxt: { color: '#FDE047', fontSize: 11, fontWeight: '900' },
   banner: {
-    backgroundColor: '#1E293B', borderColor: '#F59E0B', borderWidth: 1,
-    borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, marginBottom: 6,
+    backgroundColor: '#FEF3C7',
+    borderColor: '#B45309',
+    borderWidth: 1.5,
+    borderRadius: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    marginBottom: 6,
   },
-  bannerText: { color: '#FDE68A', fontSize: 11, fontWeight: '700' },
+  bannerText: { color: '#78350F', fontSize: 11, fontWeight: '800' },
   searchInput: {
-    backgroundColor: '#0F172A', borderWidth: 1, borderColor: '#334155',
-    borderRadius: 8, color: '#F8FAFC', fontSize: 12, paddingHorizontal: 10, paddingVertical: 6,
+    backgroundColor: '#FFF7E0',
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    borderRadius: 8,
+    color: NS_THEME.inkDark,
+    fontSize: 12,
+    fontWeight: '700',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     marginBottom: 8,
   },
-  list: { gap: 7, paddingBottom: 16 },
+  list: { gap: 7, paddingBottom: 12 },
   card: {
-    flexDirection: 'row', alignItems: 'center', backgroundColor: '#0F172A',
-    borderRadius: 8, borderWidth: 1, borderColor: '#1E293B', padding: 9, gap: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: NS_THEME.parchmentCard,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    padding: 9,
+    gap: 10,
   },
-  itemTitle: { color: '#F8FAFC', fontSize: 12, fontWeight: '800' },
-  reqLine: { fontSize: 10, fontWeight: '700', marginTop: 2 },
-  okText: { color: '#4ADE80' },
-  missText: { color: '#F87171' },
-  matLine: { color: '#94A3B8', fontSize: 10, marginTop: 2 },
+  itemTitle: { color: NS_THEME.inkDark, fontSize: 12, fontWeight: '900' },
+  reqLine: { fontSize: 10, fontWeight: '800', marginTop: 2 },
+  okText: { color: '#15803D' },
+  missText: { color: '#B91C1C' },
+  matLine: { color: NS_THEME.inkMid, fontSize: 10, fontWeight: '600', marginTop: 2 },
   btnCol: { flexDirection: 'row', gap: 6 },
-  forgeBtn: { paddingHorizontal: 10, paddingVertical: 7, borderRadius: 6, minWidth: 74, alignItems: 'center' },
-  btnText: { color: '#FFF', fontSize: 10, fontWeight: '800' },
+  forgeBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 7,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorderDark,
+    minWidth: 74,
+    alignItems: 'center',
+  },
+  btnText: { color: '#FFF', fontSize: 10.5, fontWeight: '900' },
 });

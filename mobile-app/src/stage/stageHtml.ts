@@ -79,13 +79,15 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
         return '';
       };
 
-      // 1) Frame Pump & __holdFrames (installed BEFORE Ruffle runtime loads)
+      // 1) Frame Pump, Speed Multiplier (1x/2x) & __holdFrames (installed BEFORE Ruffle runtime loads)
       var origRaf = window.requestAnimationFrame ? window.requestAnimationFrame.bind(window) : null;
       var pending = [];
       var seq = 0;
       var armed = false;
       var held = false;
       var clock = 0;
+      var lastRealTs = null;
+      var speedMult = 1;
 
       function flushQueue() {
         var batch = pending;
@@ -104,10 +106,21 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
         armed = true;
         origRaf(function (ts) {
           armed = false;
-          if (ts > clock) clock = ts;
+          if (lastRealTs === null) {
+            lastRealTs = ts;
+            if (ts > clock) clock = ts;
+          } else {
+            var dt = Math.max(0, Math.min(100, ts - lastRealTs));
+            lastRealTs = ts;
+            clock += dt * speedMult;
+          }
           if (!held) flushQueue();
         });
       }
+
+      window.__setSpeed = function (mult) {
+        speedMult = mult >= 2 ? 2 : 1;
+      };
 
       if (origRaf) {
         window.requestAnimationFrame = function (cb) {
@@ -181,7 +194,7 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
       wmode: 'transparent',
       backgroundColor: null,
       letterbox: 'off',
-      scale: 'showAll',
+      scale: 'noBorder',
       quality: 'medium',
       allowScriptAccess: true,
       logLevel: 'error'
@@ -202,7 +215,7 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
         if (swfByteCache[url]) {
           return swfByteCache[url];
         }
-        var resp = await fetch(url, { mode: 'cors', cache: 'no-store' });
+        var resp = await fetch(url, { mode: 'cors', cache: 'force-cache' });
         if (!resp.ok) {
           throw new Error('SWF HTTP ' + resp.status + ' (' + url + ')');
         }
@@ -272,6 +285,88 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
             });
             window.__reportMemory();
             post({ type: 'STAGE_READY', url: cmd.url });
+            return;
+          }
+
+          if (cmd.type === 'CAPTURE_SKILL_ICONS' && cmd.url && Array.isArray(cmd.skillIds)) {
+            if (!window.RufflePlayer || cmd.skillIds.length === 0) return;
+            var count = Math.min(6, cmd.skillIds.length);
+            var cell = 64;
+            var host = document.createElement('div');
+            host.style.position = 'fixed';
+            host.style.left = '0px';
+            host.style.top = '0px';
+            host.style.width = (count * cell) + 'px';
+            host.style.height = cell + 'px';
+            host.style.opacity = '0.01';
+            host.style.zIndex = '-1';
+            host.style.pointerEvents = 'none';
+            document.body.appendChild(host);
+            try {
+              var ruffle = window.RufflePlayer.newest();
+              var iconPlayer = ruffle.createPlayer();
+              iconPlayer.style.width = (count * cell) + 'px';
+              iconPlayer.style.height = cell + 'px';
+              host.appendChild(iconPlayer);
+              var iconBytes = await getSwfBytes(cmd.url);
+              await iconPlayer.load({
+                data: iconBytes.slice(0),
+                swfFileName: 'skill_icons.swf',
+                preferredRenderer: 'canvas',
+                wmode: 'transparent',
+                backgroundColor: null,
+                quality: 'high',
+                scale: 'exactFit',
+                letterbox: 'off',
+                autoplay: 'on',
+                splashScreen: false,
+                unmuteOverlay: 'hidden',
+                contextMenu: 'off'
+              });
+              var waitTick = function () {
+                return new Promise(function (resolve) {
+                  setTimeout(resolve, 45);
+                });
+              };
+              var sliceCanvas = document.createElement('canvas');
+              sliceCanvas.width = cell;
+              sliceCanvas.height = cell;
+              var ctx = sliceCanvas.getContext('2d');
+              var captured = false;
+              for (var attempt = 0; attempt < 18 && !captured; attempt++) {
+                await waitTick();
+                var srcCanvas = iconPlayer.shadowRoot && iconPlayer.shadowRoot.querySelector('canvas');
+                if (!srcCanvas || srcCanvas.width <= 0 || srcCanvas.height <= 0) continue;
+                var srcCellW = srcCanvas.width / count;
+                var srcCellH = srcCanvas.height;
+                ctx.clearRect(0, 0, cell, cell);
+                ctx.drawImage(srcCanvas, 0, 0, srcCellW, srcCellH, 0, 0, cell, cell);
+                var imgData = ctx.getImageData(0, 0, cell, cell).data;
+                var nonZero = 0;
+                for (var px = 3; px < imgData.length; px += 16) {
+                  if (imgData[px] > 10) { nonZero++; break; }
+                }
+                if (nonZero > 0) {
+                  var outIcons = {};
+                  for (var idx = 0; idx < count; idx++) {
+                    ctx.clearRect(0, 0, cell, cell);
+                    ctx.drawImage(srcCanvas, idx * srcCellW, 0, srcCellW, srcCellH, 0, 0, cell, cell);
+                    outIcons[cmd.skillIds[idx]] = sliceCanvas.toDataURL('image/png');
+                  }
+                  post({ type: 'SKILL_ICONS', icons: outIcons });
+                  captured = true;
+                }
+              }
+            } catch (iconErr) {
+              // Silent fallback to elemental crest icons
+            } finally {
+              try { host.remove(); } catch (e) {}
+            }
+            return;
+          }
+
+          if (cmd.type === 'SET_SPEED') {
+            window.__setSpeed && window.__setSpeed(Number(cmd.speed || 1));
             return;
           }
 

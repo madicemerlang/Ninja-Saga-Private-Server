@@ -40,6 +40,7 @@ class MobileAuthController extends Controller
             'status' => 1,
             'uid' => $user->id,
             'username' => $user->username,
+            'account_type' => (int) ($user->account_type ?? 0),
             'sessionkey' => $sessionKey,
             'characters' => $characters,
             'seasons' => [

@@ -14,16 +14,21 @@ export interface TimelineTokenProps {
   gauge: number; // 0 to 100
   isActive: boolean;
   isPlayer: boolean;
+  isPet?: boolean;
   emoji?: string;
   turnKey?: number;
 }
 
+/**
+ * Ninja Horizon-styled circular ATB medallion marker that glides smoothly
+ * along the golden top-center ATB rail toward the ACT emblem.
+ */
 export function TimelineToken({
   name,
-  agility,
   gauge,
   isActive,
   isPlayer,
+  isPet,
   emoji,
   turnKey,
 }: TimelineTokenProps) {
@@ -31,22 +36,20 @@ export function TimelineToken({
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const prevTurnKeyRef = useRef(turnKey);
 
-  // Smooth slide across timeline when gauge changes or when actor gets consecutive turn
   useEffect(() => {
     const isConsecutiveTurn =
       turnKey !== undefined &&
       turnKey !== prevTurnKeyRef.current &&
       isActive &&
-      gauge === 100;
+      gauge >= 100;
 
     prevTurnKeyRef.current = turnKey;
 
     if (isConsecutiveTurn) {
-      // Snap to 0 immediately so the token visibly slides all the way from start to finish again!
       animGauge.setValue(0);
       Animated.timing(animGauge, {
         toValue: 100,
-        duration: 520,
+        duration: 460,
         easing: Easing.out(Easing.cubic),
         useNativeDriver: false,
       }).start();
@@ -56,26 +59,25 @@ export function TimelineToken({
     const isReset = gauge === 0;
     Animated.timing(animGauge, {
       toValue: Math.max(0, Math.min(100, gauge)),
-      duration: isReset ? 220 : 520,
+      duration: isReset ? 200 : 460,
       easing: isReset ? Easing.linear : Easing.out(Easing.cubic),
       useNativeDriver: false,
     }).start();
   }, [gauge, turnKey, isActive, animGauge]);
 
-  // Gentle breathing/pulse animation when token reaches 100% (READY)
   useEffect(() => {
     if (isActive) {
       const loop = Animated.loop(
         Animated.sequence([
           Animated.timing(pulseAnim, {
-            toValue: 1.12,
-            duration: 340,
+            toValue: 1.16,
+            duration: 320,
             easing: Easing.inOut(Easing.quad),
             useNativeDriver: false,
           }),
           Animated.timing(pulseAnim, {
             toValue: 1.0,
-            duration: 340,
+            duration: 320,
             easing: Easing.inOut(Easing.quad),
             useNativeDriver: false,
           }),
@@ -90,91 +92,120 @@ export function TimelineToken({
 
   const leftInterpolated = animGauge.interpolate({
     inputRange: [0, 100],
-    outputRange: ['1%', '89%'],
+    outputRange: ['2%', '98%'],
     extrapolate: 'clamp',
   });
 
-  const displayEmoji = emoji ?? (isPlayer ? '🥷' : '👺');
+  const displayEmoji = emoji ?? (isPet ? '🐾' : isPlayer ? '🥷' : '👺');
 
   return (
     <Animated.View
       style={[
-        styles.tokenBase,
-        isPlayer ? styles.playerToken : styles.enemyToken,
-        isActive && styles.activeTokenGlow,
+        styles.markerWrap,
+        isActive && styles.markerActiveZ,
         {
           left: leftInterpolated,
-          transform: [{ scale: pulseAnim }],
+          transform: [{ translateX: -12 }, { scale: pulseAnim }],
         },
       ]}
     >
-      <Text style={styles.tokenEmoji}>{displayEmoji}</Text>
-      <Text style={styles.tokenText} numberOfLines={1}>
-        {name}
-      </Text>
-      <View style={styles.agiBadge}>
-        <Text style={styles.tokenAgi}>{agility}</Text>
+      <View
+        style={[
+          styles.medallion,
+          isPet ? styles.petRing : isPlayer ? styles.playerRing : styles.enemyRing,
+          isActive && styles.activeRing,
+        ]}
+      >
+        <Text style={styles.emoji}>{displayEmoji}</Text>
+      </View>
+      <View
+        style={[
+          styles.tagPill,
+          isPet ? styles.petTag : isPlayer ? styles.playerTag : styles.enemyTag,
+          isActive && styles.activeTag,
+        ]}
+      >
+        <Text style={styles.tagText} numberOfLines={1}>
+          {name}
+        </Text>
       </View>
     </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
-  tokenBase: {
+  markerWrap: {
     position: 'absolute',
-    height: 18,
-    minWidth: 44,
-    borderRadius: 9,
-    flexDirection: 'row',
+    top: -6,
     alignItems: 'center',
-    paddingHorizontal: 4,
-    justifyContent: 'center',
-    borderWidth: 1,
     zIndex: 10,
+  },
+  markerActiveZ: {
+    zIndex: 25,
+  },
+  medallion: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.5,
-    shadowRadius: 2,
-    elevation: 3,
+    shadowOpacity: 0.75,
+    shadowRadius: 3,
+    elevation: 4,
   },
-  playerToken: {
-    backgroundColor: '#0284C7',
+  playerRing: {
+    backgroundColor: '#0C4A6E',
     borderColor: '#38BDF8',
   },
-  enemyToken: {
-    backgroundColor: '#DC2626',
+  petRing: {
+    backgroundColor: '#115E59',
+    borderColor: '#2DD4BF',
+  },
+  enemyRing: {
+    backgroundColor: '#7F1D1D',
     borderColor: '#F87171',
   },
-  activeTokenGlow: {
+  activeRing: {
+    backgroundColor: '#B45309',
     borderColor: '#FACC15',
-    borderWidth: 1.5,
-    backgroundColor: '#D97706',
-    shadowColor: '#F59E0B',
-    shadowOffset: { width: 0, height: 0 },
+    borderWidth: 2.2,
+    shadowColor: '#FACC15',
     shadowOpacity: 0.95,
     shadowRadius: 6,
-    elevation: 6,
-    zIndex: 20,
   },
-  tokenEmoji: {
-    fontSize: 9,
-    marginRight: 2,
+  emoji: {
+    fontSize: 11,
   },
-  tokenText: {
-    fontSize: 8,
-    fontWeight: '900',
-    color: '#FFFFFF',
-  },
-  agiBadge: {
-    backgroundColor: 'rgba(0, 0, 0, 0.35)',
-    borderRadius: 4,
-    paddingHorizontal: 2.5,
+  tagPill: {
+    marginTop: 1,
+    paddingHorizontal: 3.5,
     paddingVertical: 0.5,
-    marginLeft: 3,
+    borderRadius: 4,
+    borderWidth: 0.75,
   },
-  tokenAgi: {
-    fontSize: 7,
-    fontWeight: '800',
-    color: '#E2E8F0',
+  playerTag: {
+    backgroundColor: 'rgba(2, 132, 199, 0.9)',
+    borderColor: '#7DD3FC',
+  },
+  petTag: {
+    backgroundColor: 'rgba(13, 148, 136, 0.9)',
+    borderColor: '#5EEAD4',
+  },
+  enemyTag: {
+    backgroundColor: 'rgba(185, 28, 28, 0.9)',
+    borderColor: '#FCA5A5',
+  },
+  activeTag: {
+    backgroundColor: '#D97706',
+    borderColor: '#FEF08A',
+  },
+  tagText: {
+    color: '#FFFFFF',
+    fontSize: 6.5,
+    fontWeight: '900',
+    letterSpacing: 0.2,
   },
 });

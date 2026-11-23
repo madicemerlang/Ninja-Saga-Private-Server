@@ -1,65 +1,74 @@
 # Ninja Saga Private Server + Mobile App (React Native / Expo + Ruffle WASM)
 
-Framework private server Ninja Saga lengkap dengan **Docker stack** (Laravel + MySQL + Live PvP + World Chat), **Unified 36 FPS Ruffle WASM SWF Compiler**, seluruh **7.459+ aset SWF asli game**, serta **aplikasi mobile React Native (Expo)**.
+Private server Ninja Saga lengkap dengan **Docker stack** (Laravel + MySQL 8 + Nginx + Live PvP + World Chat), **Unified 36 FPS Ruffle WASM SWF Compiler**, seluruh **7.459+ aset SWF asli game**, serta **aplikasi mobile React Native (Expo)** berorientasi landscape.
 
 ---
 
 ## ✨ Fitur Utama
 
-### ⚔️ Sistem Pertarungan (Battle Engine)
-- **Unified 36 FPS Ruffle Stage**: Player, 1–3 musuh simultan, dan animasi jutsu dikompilasi ke satu SWF battle (`Database/Laragon/ninjasage/scripts/swf_builder.py`) sehingga bebas flicker dan tumpang tindih.
-- **Agility Timeline Bar**: Urutan giliran real-time berbasis Agility efektif lengkap dengan animasi luncur token yang halus.
-- **Formula Combat & Atribut Elemen Asli**:
-  - **Weapon Attack**: Damage senjata ±20% variance dan memulihkan **+5% CP** baik kena maupun miss.
-  - **Fire**: `+1%` damage Ninjutsu Fire, `+0.4%` semua damage, dan `0.4%/poin` peluang **Combustion (+30% damage, 1 turn)**.
-  - **Thunder**: `+1%` damage Ninjutsu Thunder, `+0.4%` Crit Chance, dan `+0.8%` Crit Damage per poin.
-  - **Wind**: `+1%` damage Ninjutsu Wind, `+0.4%` Dodge Chance, dan `+1` Agility per poin.
-  - **Water**: `+1%` damage Ninjutsu Water, `+30` Max CP, `+1%` Healing Bonus, dan `0.4%/poin` peluang **Purify** di awal giliran.
-  - **Earth**: `+1%` damage Ninjutsu Earth, `+30` Max HP, dan `0.4%/poin` peluang **Reactive Force** (memantulkan 30% damage).
-- **Sistem Buff & Debuff Resmi** (`skill-effect.json` & `enemy.json`): Stun, Sleep, Frozen, Petrify, Prison, Fear, Chaos, Restriction, Meridian Seal, Burn/Blaze, Poison, Bleeding, Strengthen, Protection, Flexible, Concentration, Slow/Muddy, Agility+, CP Shield, Lightning Armor, Fire Wall, Bloodfeed, Purify, Disperse, dll.
-- **Atribut Musuh Asli** (`enemy.json`): HP, CP, Agility, Dodge, Critical, Accuracy, Purify, Reactive Force, Combustion, serta damage & cooldown tiap jurus boss.
+### ⚔️ Sistem Pertarungan (36 FPS Unified Battle Engine)
+- **Unified 36 FPS Ruffle Stage**: Player, Pet, 1–3 musuh simultan, dan animasi jurus dikompilasi ke satu SWF battle ([swf_builder.py](Database/Laragon/ninjasage/scripts/swf_builder.py)) sehingga halus 36 FPS tanpa flicker.
+- **Kontrol Battle Modern**: Kecepatan **1x / 2x**, **AUTO Battle**, **AoE Skills**, **Pet pada ATB Timeline**, **Consumables**, **Flee Modal**, serta **ikon Jutsu 50×50 asli Ninja Saga**.
+- **Tap & Hold Inspector**: Tekan & tahan karakter/musuh untuk melihat stat efektif live (termasuk buff/debuff aktif), atau tekan & tahan ikon Jutsu untuk melihat detail damage, CP, cooldown, dan efeknya.
+- **Agility Timeline Bar**: Urutan giliran real-time berbasis Agility efektif lengkap dengan animasi token.
+- **Formula Combat, Elemen & Buff/Debuff Asli** (`skill-effect.json` & `enemy.json`):
+  - **Weapon Attack**: Damage senjata ±20% variance & memulihkan **+5% CP**.
+  - **Fire / Thunder / Wind / Water / Earth**: Bonus damage elemen, Combustion, Crit/Crit Damage, Dodge/Agility, Max CP/Healing/Purify, Max HP/Reactive Force.
+  - **Buff & Debuff Resmi**: Stun, Sleep, Frozen, Petrify, Prison, Fear, Chaos, Restriction, Meridian Seal, Burn/Blaze, Poison, Bleeding, Strengthen, Protection, Flexible, Concentration, Slow, CP Shield, Lightning Armor, Fire Wall, Bloodfeed, Purify, Disperse, dll.
 
-### 🏘️ Fitur Village Hub (Mobile App)
-- **Missions**: Pertarungan 1–3 musuh dengan reward XP, Gold, dan Level Up.
-- **Shop, Gear & Stats**: Beli & equip Weapon, Clothing, Back Item, Jutsu, serta alokasi Attribute Points.
-- **Pet House**: 142 pet asli lengkap dengan live preview SWF, Buy, Equip, dan Unequip.
-- **Advance Academy**: Upgrade jutsu per elemen (`Fire`, `Wind`, `Thunder`, `Earth`, `Water`, `Genjutsu`).
-- **Hunting House**: 5 Zona Boss asli, klaim Daily Kari Badge, Boss Hunt 36 FPS, dan Hunting Market Forge.
-- **Forge (Blacksmith)**: 65 resep tempa senjata resmi menggunakan Gold atau Tokens.
-- **Talent Hall**: Extreme & Secret Talent discovery serta upgrade skill menggunakan TP (Lv. 1–10).
-- **Live PvP Arena (`:3000`) & World Chat (`:3002`)**.
-- **All Game Assets Explorer**: Akses langsung ke 7.459+ aset SWF asli (11 kategori) dan audio MP3.
-
----
-
-## 📋 Prasyarat
-
-- **Docker** & **Docker Compose** (direkomendasikan untuk menjalankan semua server sekaligus)
-- **Node.js 20+** & **npm** (untuk menjalankan aplikasi mobile Expo)
-- **Expo Go** di HP Android/iOS (terhubung ke jaringan Wi-Fi / LAN yang sama dengan server)
+### 🏘️ Village Hub & UI Mobile (React Native / Expo)
+- **Login & Character Select**: Artwork full-screen, Free vs Premium badge, buat karakter baru dengan **live 36 FPS preview** (gender, gaya rambut, warna rambut), hapus karakter, serta **Tokens shared per akun** (`users.tokens`).
+- **Village Hub Interaktif**: Peta desa panoramik dengan 8 bangunan yang dapat diklik langsung (**Mission Room**, **Academy**, **PvP Arena**, **Talent Hall**, **Blacksmith**, **Ninja Shop**, **Pet Shop**, **Hunting House**) + **HUD 56×56 Portrait Kepala Karakter 36 FPS**.
+- **Menu Utama (Bottom Dock)**:
+  - **My Jutsu**: Kelola loadout jurus & live 36 FPS preview animasi jurus.
+  - **Stats**: Pedestal karakter 36 FPS live, detail Combat Stats, dan alokasi 5 Elemental Attribute Points.
+  - **Inventory**: Tas item milik sendiri (Weapon, Outfit, Back, Accessory, Hair, Material) + live 36 FPS try-on & Equip.
+  - **Pet**: Daftar pet milik sendiri, Equip/Unequip, dan **Pelajari Jurus Pet** (`character_pets.learned_skills`).
+  - **Chat & Mission**: Akses cepat World Chat (`:3002`) dan Mission Room.
+- **Bangunan Lengkap dengan UI Gulungan Perkamen & Bambu**:
+  - **Mission Room**: Filter Grade (`All`, `C`, `B`, `A`, `S`) dengan pertarungan 1–3 musuh.
+  - **Academy & Advance Academy**: 250+ jurus per elemen + live 36 FPS preview & tier upgrade.
+  - **Ninja Shop & Pet Shop**: Katalog gear (live try-on) dan 142 pet asli.
+  - **Hunting House**: 5 Zona Boss asli, Daily Kari Badge, Boss Hunt 36 FPS, dan Hunting Market Forge.
+  - **Blacksmith (Forge)**: 65 resep tempa senjata menggunakan Gold atau Tokens.
+  - **Talent Hall**: Extreme & Secret Talent discovery & upgrade Lv. 1–10.
+  - **Live PvP Arena (`:3000`) & World Chat (`:3002`)**.
 
 ---
 
-## 🚀 Cara Menjalankan Project
+## 📋 Prasyarat Server & Client
 
-### 1. Clone Repository
+### Server (Backend)
+- **Linux VPS / PC** (Ubuntu 22.04/24.04 atau Debian 12 direkomendasikan)
+- **Docker Engine** & **Docker Compose Plugin** (`docker compose`)
+- RAM minimal **2 GB** (disarankan **4 GB** untuk kompilasi SWF & MySQL yang lega)
+- Storage minimal **10 GB** kosong
+
+### Client (Mobile App)
+- **Node.js 20+** & **npm**
+- **Expo Go** di HP Android/iOS (untuk development / testing LAN) atau **EAS CLI / Android SDK** (untuk build APK standalone)
+
+---
+
+## 🚀 Panduan Deployment Server (Docker — Direkomendasikan)
+
+### 1. Clone Repository di Server
 
 ```bash
 git clone https://github.com/madicemerlang/Ninja-Saga-Private-Server.git
 cd Ninja-Saga-Private-Server
 ```
 
----
+### 2. Siapkan File Environment
 
-### 2. Konfigurasi Environment Docker
-
-Salin file contoh `.env.docker.example` menjadi `.env` di root repository:
+#### a. Environment Docker (Root Project)
+Salin `.env.docker.example` menjadi `.env`:
 
 ```bash
 cp .env.docker.example .env
 ```
 
-Edit `.env` dan ganti `192.168.1.10` dengan **IP LAN komputer/server Anda** (cek via `ip a` di Linux/Mac atau `ipconfig` di Windows):
+Edit `.env` sesuai alamat IP LAN (untuk lokal) atau IP Publik / Domain VPS Anda:
 
 ```env
 HTTP_PORT=8080
@@ -67,82 +76,187 @@ MYSQL_PORT=3306
 PVP_PORT=3000
 CHAT_PORT=3002
 
+# Untuk VPS / Production ganti APP_ENV=production dan APP_DEBUG=false
 APP_ENV=local
 APP_DEBUG=true
-APP_URL=http://<IP_LAN_ANDA>:8080
+APP_URL=http://<IP_SERVER_ATAU_DOMAIN>:8080
 
 DB_DATABASE=ninjasage
-DB_PASSWORD=ninjasage_secret
+DB_PASSWORD=ganti_dengan_password_mysql_kuat
 
-PVP_SOCKET_URL=http://<IP_LAN_ANDA>:3000/pvp
-CHAT_SOCKET_URL=http://<IP_LAN_ANDA>:3002
-CHAT_ADMIN_SECRET=change-me-to-a-random-secret
+PVP_SOCKET_URL=http://<IP_SERVER_ATAU_DOMAIN>:3000/pvp
+CHAT_SOCKET_URL=http://<IP_SERVER_ATAU_DOMAIN>:3002
+CHAT_ADMIN_SECRET=ganti_dengan_random_secret_panjang
 ```
 
-> Juga pastikan `Database/Laragon/ninjasage/.env` sudah ada (jika belum, jalankan `cp Database/Laragon/ninjasage/.env.example Database/Laragon/ninjasage/.env`).
+#### b. Environment Laravel
+Pastikan `Database/Laragon/ninjasage/.env` tersedia:
 
----
+```bash
+cp Database/Laragon/ninjasage/.env.example Database/Laragon/ninjasage/.env
+```
 
-### 3. Jalankan Semua Server Backend via Docker
+> Variabel `APP_*`, `DB_*`, `PVP_SOCKET_URL`, `CHAT_SOCKET_URL`, dan `SWF_ASSETS_PATH` otomatis di-override oleh `docker-compose.yml` di dalam container `ninjasage-app`.
+
+### 3. Build & Jalankan Semua Container
 
 ```bash
 docker compose up -d --build
 ```
 
-Perintah ini otomatis menyalakan 5 container:
+Perintah ini akan menjalankan 5 container secara otomatis:
 
 | Service | Container | Port | Fungsi |
 | :--- | :--- | :--- | :--- |
 | `nginx` | `ninjasage-nginx` | `8080` | Web server, REST API Mobile, Ruffle WASM, SWF & Game Data |
-| `app` | `ninjasage-app` | internal | PHP-FPM Laravel + Python `swf_builder.py` |
-| `mysql` | `ninjasage-mysql` | `3306` | Database MySQL 8.0 |
-| `pvp-server` | `ninjasage-pvp` | `3000` | Socket.IO Live PvP Server |
-| `chat-server` | `ninjasage-chat` | `3002` | Socket.IO World & Clan Chat Server |
+| `app` | `ninjasage-app` | internal | PHP-FPM Laravel + Python 3 (`swf_builder.py`) |
+| `mysql` | `ninjasage-mysql` | `3306` | Database MySQL 8.0 (volume `mysql_data`) |
+| `pvp-server` | `ninjasage-pvp` | `3000` | Node.js Socket.IO Live PvP Server |
+| `chat-server` | `ninjasage-chat` | `3002` | Node.js Socket.IO World & Clan Chat Server |
 
-#### Inisialisasi Laravel & Database (Pertama Kali Saja)
+### 4. Inisialisasi Laravel & Database (Pertama Kali Saja)
 
 ```bash
-docker exec -it ninjasage-app composer install
+docker exec -it ninjasage-app composer install --no-dev --optimize-autoloader
 docker exec -it ninjasage-app php artisan key:generate
 docker exec -it ninjasage-app php artisan migrate --seed
+docker exec -it ninjasage-app chown -R www-data:www-data storage bootstrap/cache
 ```
 
-#### Verifikasi Server Berjalan
+### 5. Verifikasi Server Berjalan
 
 ```bash
+docker compose ps
 curl http://127.0.0.1:8080/api/v1/health
 curl http://127.0.0.1:8080/api/v1/assets/catalog
 ```
 
-**Admin Panel**: `http://<IP_LAN_ANDA>:8080/admin/login`
-- Email default: `admin@admin.test`
-- Password default: `admin`
+Pastikan `/api/v1/health` mengembalikan status `ok` dan `swf_assets_ready: true`.
+
+- **Admin Panel**: `http://<IP_SERVER>:8080/admin/login`
+  - Email default: `admin@admin.test`
+  - Password default: `admin` *(segera ganti di server production!)*
 
 ---
 
-### 4. Jalankan Aplikasi Mobile (Expo)
+## 🌐 Deployment Production di VPS (Ubuntu/Debian + Firewall + HTTPS)
 
-Buka terminal baru dan masuk ke folder `mobile-app`:
+Jika deploy ke VPS publik agar bisa diakses dari mana saja:
+
+### 1. Instal Docker di VPS (Ubuntu/Debian)
+
+```bash
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+### 2. Konfigurasi Firewall (UFW)
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+# Jika belum memakai reverse proxy HTTPS, buka port langsung:
+sudo ufw allow 8080/tcp
+sudo ufw allow 3000/tcp
+sudo ufw allow 3002/tcp
+sudo ufw enable
+```
+
+> **Catatan Keamanan**: Jangan buka port `3306` (MySQL) ke publik. Anda bisa mengubah binding di `docker-compose.yml` menjadi `127.0.0.1:3306:3306`.
+
+### 3. Hardening Production & Cache Laravel
+
+Di `.env` root:
+- Set `APP_ENV=production` dan `APP_DEBUG=false`.
+- Gunakan password kuat untuk `DB_PASSWORD` dan `CHAT_ADMIN_SECRET`.
+
+Lalu jalankan optimasi cache Laravel:
+
+```bash
+docker exec -it ninjasage-app php artisan config:cache
+docker exec -it ninjasage-app php artisan route:cache
+docker exec -it ninjasage-app php artisan view:cache
+```
+
+### 4. Reverse Proxy HTTPS dengan Nginx (Opsional, Direkomendasikan untuk Domain)
+
+Contoh konfigurasi `/etc/nginx/sites-available/ninjasage` (lanjutkan dengan `sudo certbot --nginx -d api.domainanda.com`):
+
+```nginx
+server {
+    listen 80;
+    server_name api.domainanda.com;
+
+    client_max_body_size 50M;
+
+    # Laravel REST API, Ruffle & SWF Assets
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Socket.IO PvP Server
+    location /pvp/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
+
+    # Socket.IO Chat Server
+    location /chat/ {
+        proxy_pass http://127.0.0.1:3002/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
+}
+```
+
+### 5. Update / Redeploy Server & Backup Database
+
+**Update dari GitHub:**
+```bash
+git pull origin main
+docker compose up -d --build
+docker exec -it ninjasage-app php artisan migrate --force
+docker exec -it ninjasage-app php artisan optimize:clear
+rm -f Database/Laragon/ninjasage/storage/app/swf_cache/*.swf
+```
+
+**Backup Database MySQL:**
+```bash
+docker exec ninjasage-mysql mysqldump -u root -p"$DB_PASSWORD" ninjasage > backup_$(date +%F).sql
+```
+
+---
+
+## 📱 Menjalankan Aplikasi Mobile (Expo / React Native)
 
 ```bash
 cd mobile-app
 npm install
 ```
 
-Jalankan Expo Metro Bundler dengan alamat IP server Anda:
-
+### Development / Testing via Expo Go
 ```bash
-EXPO_PUBLIC_API_BASE_URL=http://<IP_LAN_ANDA>:8080 npx expo start
+EXPO_PUBLIC_API_BASE_URL=http://<IP_SERVER_ATAU_DOMAIN>:8080 npx expo start
 ```
 
-> Atau Anda bisa langsung menjalankan `npx expo start` lalu mengubah **Server URL** di layar Login aplikasi.
+> Anda juga bisa menjalankan `npx expo start` lalu mengubah **Server URL** langsung dari layar Login aplikasi.
 
-1. Buka aplikasi **Expo Go** di HP Android/iOS (pastikan 1 jaringan Wi-Fi dengan server).
+1. Buka aplikasi **Expo Go** di HP Android/iOS.
 2. Scan QR Code yang muncul di terminal.
-3. Login / Register akun baru, buat karakter ninja, dan mulai bermain!
+3. Register / Login, buat karakter ninja, dan mulai bermain!
 
-#### Cek TypeScript (Opsional untuk Development)
-
+### Cek TypeScript
 ```bash
 cd mobile-app
 npm run typecheck
@@ -150,43 +264,64 @@ npm run typecheck
 
 ---
 
+## 🪟 Alternatif: Menjalankan di Windows via Laragon (Tanpa Docker)
+
+1. Salin `Database/Laragon/ninjasage` ke `C:\laragon\www\ninjasage`.
+2. Aktifkan **PHP 8.4+** (dengan ekstensi `zip`, `pdo_mysql`) dan pastikan **Python 3** tersedia di `PATH` untuk `swf_builder.py`.
+3. Buat database `ninjasage`, sesuaikan `Database/Laragon/ninjasage/.env` (termasuk `SWF_ASSETS_PATH` mengarah ke folder `Custom Client/NS Custom Client V1`).
+4. Jalankan:
+   ```bash
+   composer install
+   php artisan key:generate
+   php artisan migrate --seed
+   ```
+5. Jalankan `npm install && npm start` di masing-masing folder `pvp-server` dan `chat-server`.
+
+---
+
 ## 📁 Struktur Repository
 
 ```text
 Ninja-Saga-Private-Server/
-├── docker-compose.yml              # Orkestrasi MySQL, PHP-FPM, Nginx, PvP, Chat
-├── .env.docker.example             # Template environment Docker
-├── docker/                         # Dockerfile PHP+Python & konfigurasi Nginx
+├── docker-compose.yml                    # Orkestrasi MySQL, PHP-FPM, Nginx, PvP, Chat
+├── .env.docker.example                   # Template environment Docker
+├── docker/                               # Dockerfile PHP+Python & konfigurasi Nginx
 ├── Custom Client/
-│   └── NS Custom Client V1/        # 7.459+ aset SWF & audio asli Ninja Saga
+│   └── NS Custom Client V1/              # 7.459+ aset SWF & audio asli Ninja Saga
 ├── Database/
-│   └── Laragon/ninjasage/          # Backend Laravel, AMF Services, game_data JSON,
-│       ├── app/Http/Controllers/Api/   # MobileAuth, MobileGame, SwfAssetController
-│       ├── scripts/swf_builder.py      # Compiler SWF 36 FPS Unified Battle Stage
-│       ├── public/game_data/           # skills, skill-effect, enemy, pet, talents, library
-│       ├── public/ruffle/              # Self-hosted Ruffle WASM runtime
-│       ├── public/audio/               # bgm.mp3, battle.mp3, click.mp3, xmas.mp3
-│       ├── pvp-server/                 # Node.js Socket.IO PvP Server (:3000)
-│       └── chat-server/                # Node.js Socket.IO Chat Server (:3002)
-└── mobile-app/                     # Aplikasi Mobile React Native (Expo + TypeScript)
+│   └── Laragon/ninjasage/                # Backend Laravel, AMF Services, game_data JSON
+│       ├── app/Http/Controllers/Api/     # MobileAuth, MobileGame, SwfAssetController
+│       ├── database/migrations/          # Migrasi tabel (termasuk pet learned_skills)
+│       ├── scripts/swf_builder.py        # Compiler SWF 36 FPS Unified Stage & Portrait
+│       ├── public/game_data/             # skills, skill-effect, enemy, pet, talents, library
+│       ├── public/ruffle/                # Self-hosted Ruffle WASM runtime
+│       ├── public/audio/                 # bgm.mp3, battle.mp3, click.mp3, xmas.mp3
+│       ├── pvp-server/                   # Node.js Socket.IO PvP Server (:3000)
+│       └── chat-server/                  # Node.js Socket.IO Chat Server (:3002)
+└── mobile-app/                           # Aplikasi Mobile React Native (Expo + TypeScript)
+    ├── assets/                           # Artwork background (Login, CharSelect, Village, 8 Buildings)
     └── src/
-        ├── api/                    # REST/RPC Client & Game Data loader
-        ├── engine/battleEngine.ts  # Combat, Agility Timeline, Buff/Debuff, Enemy stats
-        ├── stage/                  # Ruffle WebView bridge
-        └── screens/                # Battle, VillageHub, Pet, Academy, Hunting, Forge, Talent, PvP, Chat
+        ├── api/                          # REST/RPC Client & Game Data loader
+        ├── components/                   # NinjaScrollWindow, BattleActionIcons, LoadingOverlay, dll.
+        ├── engine/battleEngine.ts        # Combat, Agility Timeline, Buff/Debuff, Pet ATB, Enemy AI
+        ├── stage/                        # Ruffle WebView bridge & HTML stage
+        └── screens/                      # Login, CharSelect, VillageHub, Battle, MyJutsu, Stats,
+                                          # MyInventory, Inventory, Pet, Academy, Hunting, Forge, Talent, PvP
 ```
 
 ---
 
 ## 🛠️ Troubleshooting
 
-- **HP tidak bisa konek ke Server URL (`http://<IP_LAN>:8080`)**:
-  - Pastikan HP dan PC/server berada di jaringan Wi-Fi/LAN yang sama.
-  - Pastikan firewall mengizinkan port `8080`, `3000`, dan `3002`.
-- **Animasi SWF masih menampilkan versi lama setelah update `swf_builder.py`**:
+- **HP tidak bisa konek ke Server URL (`http://<IP_SERVER>:8080`)**:
+  - Pastikan HP dan server berada di jaringan LAN yang sama (atau VPS sudah membuka firewall port `8080`, `3000`, `3002`).
+  - Cek `curl http://<IP_SERVER>:8080/api/v1/health` dari browser HP.
+- **Animasi / Portrait SWF masih menampilkan versi lama setelah update `swf_builder.py`**:
   - Bersihkan cache SWF di server:
     ```bash
-    rm -f Database/Laragon/ninjasage/storage/app/swf_cache/battle_*.swf
+    rm -f Database/Laragon/ninjasage/storage/app/swf_cache/*.swf
     ```
-- **Menjalankan dengan Laragon (Windows tanpa Docker)**:
-  - Salin `Database/Laragon/ninjasage` ke `C:\laragon\www\ninjasage`, aktifkan PHP 8.4+ dan ekstensi `zip`, jalankan `composer install`, `php artisan key:generate`, `php artisan migrate --seed`, lalu jalankan `npm start` di folder `chat-server` dan `pvp-server`.
+- **Permission error pada `storage/` di Docker**:
+  ```bash
+  docker exec -it ninjasage-app chown -R www-data:www-data storage bootstrap/cache
+  ```

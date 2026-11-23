@@ -9,7 +9,11 @@ export type ScreenName =
   | 'missions'
   | 'battle'
   | 'inventory'
+  | 'bag'
+  | 'myJutsu'
+  | 'stats'
   | 'pet'
+  | 'petShop'
   | 'academy'
   | 'hunting'
   | 'forge'
@@ -44,6 +48,8 @@ export interface ActiveCharacterProfile {
   gender: number;
   level: number;
   xp: number;
+  prevLevelXp: number;
+  nextLevelXp: number;
   gold: number;
   tp: number;
   tokens: number;
@@ -77,6 +83,7 @@ interface AuthState {
   serverUrl: string;
   uid: number | null;
   username: string | null;
+  accountType: number;
   sessionKey: string | null;
   characters: CharacterSummary[];
   activeCharacterId: number | null;
@@ -158,6 +165,8 @@ function parseProfile(charId: number, raw: Record<string, unknown>): ActiveChara
     gender: Number(cd.character_gender ?? cd.gender ?? 0),
     level: Number(cd.character_level ?? cd.level ?? 1),
     xp: Number(cd.character_xp ?? cd.xp ?? 0),
+    prevLevelXp: Number(raw.prev_level_xp ?? 0),
+    nextLevelXp: Number(raw.next_level_xp ?? Math.max(100, Number(cd.character_level ?? cd.level ?? 1) * 150)),
     gold: Number(cd.character_gold ?? cd.gold ?? 0),
     tp: Number(cd.character_tp ?? cd.tp ?? 0),
     tokens: Number(acc.account_tokens ?? cd.tokens ?? raw.account_tokens ?? 0),
@@ -199,6 +208,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   serverUrl: DEFAULT_API_BASE_URL,
   uid: null,
   username: null,
+  accountType: 0,
   sessionKey: null,
   characters: [],
   activeCharacterId: null,
@@ -219,6 +229,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({
       uid: res.uid,
       username: res.username,
+      accountType: Number(res.account_type ?? res.characters?.account_type ?? 0),
       sessionKey: res.sessionkey,
       characters: list,
       activeCharacterId: list[0]?.char_id ?? null,
@@ -233,10 +244,14 @@ export const useAuthStore = create<AuthState>((set) => ({
   setActiveCharacterId: (id) => set({ activeCharacterId: id }),
 
   setProfileFromRaw: (charId, raw) =>
-    set({
+    set((state) => ({
       activeCharacterId: charId,
+      accountType:
+        raw.account_type !== undefined
+          ? Number(raw.account_type)
+          : state.accountType,
       profile: parseProfile(charId, raw),
-    }),
+    })),
 
   patchProfileStats: (patch) =>
     set((state) => {

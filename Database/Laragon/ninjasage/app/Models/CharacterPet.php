@@ -16,6 +16,7 @@ class CharacterPet extends Model
         'xp',
         'name',
         'maturity_points',
+        'learned_skills',
     ];
 
     public function character()

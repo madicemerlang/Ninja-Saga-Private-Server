@@ -7,9 +7,10 @@ import {
   Text,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { MobileApiClient, type TalentCatalogItem } from '../api/client';
 import { playClickSfx } from '../audio/audioManager';
+import { BUILDING_BGS } from '../components/BuildingSceneBackdrop';
+import { NinjaScrollWindow, NS_THEME } from '../components/NinjaScrollWindow';
 import { useAuthStore } from '../store/useAuthStore';
 
 interface OwnedTalentSkill {
@@ -71,13 +72,11 @@ export function TalentScreen() {
     await loadAll();
   };
 
-  // Non-skill entries are discoverable talent trees (e.g. 'de', 'dp', 'dm', 'lm', 'sm', 'eightext', etc.)
   const discoverableTrees = useMemo(
     () => catalog.filter((t) => !t.talent_id.startsWith('skill_')),
     [catalog]
   );
 
-  // Map skill_id:level -> catalog info
   const skillInfoByIdLv = useMemo(() => {
     const map: Record<string, TalentCatalogItem> = {};
     for (const t of catalog) {
@@ -88,13 +87,11 @@ export function TalentScreen() {
     return map;
   }, [catalog]);
 
-  // Active character's unlocked talent trees (slot 1 Extreme, slot 2/3 Secret)
   const unlockedTrees = useMemo(
     () => [profile?.talent1, profile?.talent2, profile?.talent3].filter((v): v is string => Boolean(v)),
     [profile?.talent1, profile?.talent2, profile?.talent3]
   );
 
-  // Skills belonging to unlocked trees (from talent_description)
   const availableTreeSkills = useMemo(() => {
     const ownedMap: Record<string, number> = {};
     for (const os of ownedSkills) {
@@ -172,17 +169,21 @@ export function TalentScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.root}>
-      <View style={styles.header}>
-        <Pressable style={styles.backBtn} onPress={() => { playClickSfx(serverUrl); navigate('hub'); }}>
-          <Text style={styles.backText}>← Village Hub</Text>
-        </Pressable>
-        <Text style={styles.title}>✨ Talent Hall (Extreme & Secret)</Text>
-        <Text style={styles.currency}>
-          TP: {(profile?.tp ?? 0).toLocaleString()} • Gold: {(profile?.gold ?? 0).toLocaleString()} • Tokens: {(profile?.tokens ?? 0).toLocaleString()}
-        </Text>
-      </View>
-
+    <NinjaScrollWindow
+      title="Talent Hall"
+      bgSource={BUILDING_BGS.talentHall}
+      onClose={() => {
+        playClickSfx(serverUrl);
+        navigate('hub');
+      }}
+      rightContent={
+        <View style={styles.currencyPill}>
+          <Text style={styles.currencyTxt}>
+            TP {(profile?.tp ?? 0).toLocaleString()} • 🪙 {(profile?.gold ?? 0).toLocaleString()} • 💎 {(profile?.tokens ?? 0).toLocaleString()}
+          </Text>
+        </View>
+      }
+    >
       {message && (
         <View style={styles.banner}>
           <Text style={styles.bannerText}>{message}</Text>
@@ -206,16 +207,32 @@ export function TalentScreen() {
       </View>
 
       <View style={styles.tabRow}>
-        <Pressable style={[styles.tabBtn, tab === 'my' && styles.tabActive]} onPress={() => setTab('my')}>
-          <Text style={styles.tabText}>Upgrade Skills ({availableTreeSkills.length})</Text>
+        <Pressable
+          style={[styles.tabBtn, tab === 'my' && styles.tabActive]}
+          onPress={() => {
+            playClickSfx(serverUrl);
+            setTab('my');
+          }}
+        >
+          <Text style={[styles.tabText, tab === 'my' && styles.tabTextActive]}>
+            Upgrade Skills ({availableTreeSkills.length})
+          </Text>
         </Pressable>
-        <Pressable style={[styles.tabBtn, tab === 'discover' && styles.tabActive]} onPress={() => setTab('discover')}>
-          <Text style={styles.tabText}>Discover Talents ({discoverableTrees.length})</Text>
+        <Pressable
+          style={[styles.tabBtn, tab === 'discover' && styles.tabActive]}
+          onPress={() => {
+            playClickSfx(serverUrl);
+            setTab('discover');
+          }}
+        >
+          <Text style={[styles.tabText, tab === 'discover' && styles.tabTextActive]}>
+            Discover Talents ({discoverableTrees.length})
+          </Text>
         </Pressable>
       </View>
 
       {loading ? (
-        <ActivityIndicator color="#F59E0B" style={{ marginTop: 24 }} />
+        <ActivityIndicator color={NS_THEME.btnOrange} style={{ marginTop: 24 }} />
       ) : tab === 'my' ? (
         <ScrollView contentContainerStyle={styles.list}>
           {availableTreeSkills.length === 0 ? (
@@ -247,7 +264,7 @@ export function TalentScreen() {
                         <Text style={styles.btnText}>+1 ({nextCost} TP)</Text>
                       </Pressable>
                       <Pressable
-                        style={[styles.upBtn, { backgroundColor: '#7C3AED' }]}
+                        style={[styles.upBtn, { backgroundColor: NS_THEME.btnPurple }]}
                         disabled={busyId !== null}
                         onPress={() => handleUpgrade(sk.baseSkillId, true)}
                       >
@@ -282,14 +299,14 @@ export function TalentScreen() {
                 ) : (
                   <View style={styles.btnRow}>
                     <Pressable
-                      style={[styles.upBtn, { backgroundColor: '#D97706' }]}
+                      style={[styles.upBtn, { backgroundColor: NS_THEME.btnOrange }]}
                       disabled={busyId !== null}
                       onPress={() => handleDiscover(t, 'Extreme')}
                     >
                       <Text style={styles.btnText}>Extreme</Text>
                     </Pressable>
                     <Pressable
-                      style={[styles.upBtn, { backgroundColor: '#2563EB' }]}
+                      style={[styles.upBtn, { backgroundColor: NS_THEME.btnBlue }]}
                       disabled={busyId !== null}
                       onPress={() => handleDiscover(t, 'Secret')}
                     >
@@ -302,49 +319,79 @@ export function TalentScreen() {
           })}
         </ScrollView>
       )}
-    </SafeAreaView>
+    </NinjaScrollWindow>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#070E1A', padding: 10 },
-  header: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: '#0F172A', borderRadius: 10, borderWidth: 1, borderColor: '#1E293B',
-    paddingHorizontal: 10, paddingVertical: 7, marginBottom: 8,
+  currencyPill: {
+    backgroundColor: '#3E2008',
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.goldTrim,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
   },
-  backBtn: { backgroundColor: '#1E293B', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6 },
-  backText: { color: '#F8FAFC', fontSize: 11, fontWeight: '700' },
-  title: { color: '#F8FAFC', fontSize: 14, fontWeight: '800' },
-  currency: { color: '#FACC15', fontSize: 11, fontWeight: '700' },
+  currencyTxt: { color: '#FDE047', fontSize: 10.5, fontWeight: '900' },
   banner: {
-    backgroundColor: '#1E293B', borderColor: '#F59E0B', borderWidth: 1,
-    borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, marginBottom: 6,
+    backgroundColor: '#FEF3C7',
+    borderColor: '#B45309',
+    borderWidth: 1.5,
+    borderRadius: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    marginBottom: 6,
   },
-  bannerText: { color: '#FDE68A', fontSize: 11, fontWeight: '700' },
+  bannerText: { color: '#78350F', fontSize: 11, fontWeight: '800' },
   slotsRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
   slotBox: {
-    flex: 1, backgroundColor: '#0F172A', borderRadius: 8,
-    borderWidth: 1, borderColor: '#334155', padding: 6, alignItems: 'center',
+    flex: 1,
+    backgroundColor: NS_THEME.parchmentCardAlt,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    padding: 6,
+    alignItems: 'center',
   },
-  slotLabel: { color: '#94A3B8', fontSize: 9, fontWeight: '800' },
-  slotVal: { color: '#38BDF8', fontSize: 12, fontWeight: '900', marginTop: 2 },
+  slotLabel: { color: NS_THEME.inkSoft, fontSize: 9, fontWeight: '900' },
+  slotVal: { color: NS_THEME.inkDark, fontSize: 12, fontWeight: '900', marginTop: 2 },
   tabRow: { flexDirection: 'row', gap: 6, marginBottom: 8 },
-  tabBtn: { backgroundColor: '#1E293B', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6 },
-  tabActive: { backgroundColor: '#7C3AED' },
-  tabText: { color: '#FFF', fontSize: 11, fontWeight: '800' },
-  list: { gap: 7, paddingBottom: 16 },
-  emptyText: { color: '#94A3B8', fontSize: 12, textAlign: 'center', marginTop: 24 },
-  card: {
-    flexDirection: 'row', alignItems: 'center', backgroundColor: '#0F172A',
-    borderRadius: 8, borderWidth: 1, borderColor: '#1E293B', padding: 9, gap: 10,
+  tabBtn: {
+    backgroundColor: NS_THEME.tabInactive,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 6,
   },
-  cardUnlocked: { borderColor: '#22C55E' },
-  cardTitle: { color: '#F8FAFC', fontSize: 12, fontWeight: '800' },
-  cardDesc: { color: '#CBD5E1', fontSize: 10, marginTop: 2 },
-  costText: { color: '#FACC15', fontSize: 10, fontWeight: '700', marginTop: 2 },
+  tabActive: { backgroundColor: NS_THEME.tabActive, borderColor: NS_THEME.woodBorderDark },
+  tabText: { color: NS_THEME.inkDark, fontSize: 11, fontWeight: '900' },
+  tabTextActive: { color: '#FFF' },
+  list: { gap: 7, paddingBottom: 12 },
+  emptyText: { color: NS_THEME.inkMid, fontSize: 12, fontWeight: '700', textAlign: 'center', marginTop: 24 },
+  card: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: NS_THEME.parchmentCard,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    padding: 9,
+    gap: 10,
+  },
+  cardUnlocked: { borderColor: NS_THEME.btnGreen, backgroundColor: '#E7F6E5' },
+  cardTitle: { color: NS_THEME.inkDark, fontSize: 12, fontWeight: '900' },
+  cardDesc: { color: NS_THEME.inkMid, fontSize: 10, fontWeight: '600', marginTop: 2 },
+  costText: { color: '#B45309', fontSize: 10, fontWeight: '800', marginTop: 2 },
   btnRow: { flexDirection: 'row', gap: 6 },
-  upBtn: { backgroundColor: '#16A34A', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
-  btnText: { color: '#FFF', fontSize: 10, fontWeight: '800' },
-  maxBadge: { color: '#4ADE80', fontSize: 11, fontWeight: '900' },
+  upBtn: {
+    backgroundColor: NS_THEME.btnGreen,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorderDark,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  btnText: { color: '#FFF', fontSize: 10, fontWeight: '900' },
+  maxBadge: { color: '#15803D', fontSize: 11, fontWeight: '900' },
 });

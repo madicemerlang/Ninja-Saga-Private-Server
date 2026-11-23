@@ -17,6 +17,8 @@ Route::middleware([MobileCorsMiddleware::class])->group(function () {
         Route::post('/characters', [MobileGameController::class, 'characterCreate']);
         Route::get('/characters/{id}', [MobileGameController::class, 'characterShow'])
             ->whereNumber('id');
+        Route::delete('/characters/{id}', [MobileGameController::class, 'characterDelete'])
+            ->whereNumber('id');
 
         Route::post('/battle/start', [MobileGameController::class, 'battleStart']);
         Route::post('/battle/finish', [MobileGameController::class, 'battleFinish']);
@@ -29,6 +31,10 @@ Route::middleware([MobileCorsMiddleware::class])->group(function () {
             ->whereNumber('charId');
         Route::get('/assets/player/{charId}.swf', [SwfAssetController::class, 'player'])
             ->whereNumber('charId');
+        Route::get('/assets/player-preview.swf', [SwfAssetController::class, 'playerPreview']);
+        Route::get('/assets/village-map.swf', [SwfAssetController::class, 'villageMap']);
+        Route::get('/assets/skill-icons.swf', [SwfAssetController::class, 'skillIcons']);
+        Route::get('/assets/icon-sheet/{category}.swf', [SwfAssetController::class, 'iconSheet']);
         Route::get('/assets/player/{charId}/skill/{skillId}.swf', [SwfAssetController::class, 'playerSkill'])
             ->whereNumber('charId');
         Route::get('/assets/swf/{category}', [SwfAssetController::class, 'index']);
