@@ -1,397 +1,192 @@
-# Ninja Saga Private Server
-A complete Ninja Saga private server framework including database, custom client, QOL management tools, Live PvP, live chat, clan/crew systems, and an expanded admin panel for managing game data without modifying code.
+# Ninja Saga Private Server + Mobile App (React Native / Expo + Ruffle WASM)
 
-## 🌿 Branch Status
-
-<p align="center">
-
-![Stable](https://img.shields.io/badge/main-stable-2ea44f?style=for-the-badge)
-![Development](https://img.shields.io/badge/dev-unstable-orange?style=for-the-badge)
-![Status](https://img.shields.io/badge/status-active%20development-blue?style=for-the-badge)
-
-</p>
+Framework private server Ninja Saga lengkap dengan **Docker stack** (Laravel + MySQL + Live PvP + World Chat), **Unified 36 FPS Ruffle WASM SWF Compiler**, seluruh **7.459+ aset SWF asli game**, serta **aplikasi mobile React Native (Expo)**.
 
 ---
 
-### 🟢 `main` — Stable
+## ✨ Fitur Utama
 
-> **Recommended for most users**
+### ⚔️ Sistem Pertarungan (Battle Engine)
+- **Unified 36 FPS Ruffle Stage**: Player, 1–3 musuh simultan, dan animasi jutsu dikompilasi ke satu SWF battle (`Database/Laragon/ninjasage/scripts/swf_builder.py`) sehingga bebas flicker dan tumpang tindih.
+- **Agility Timeline Bar**: Urutan giliran real-time berbasis Agility efektif lengkap dengan animasi luncur token yang halus.
+- **Formula Combat & Atribut Elemen Asli**:
+  - **Weapon Attack**: Damage senjata ±20% variance dan memulihkan **+5% CP** baik kena maupun miss.
+  - **Fire**: `+1%` damage Ninjutsu Fire, `+0.4%` semua damage, dan `0.4%/poin` peluang **Combustion (+30% damage, 1 turn)**.
+  - **Thunder**: `+1%` damage Ninjutsu Thunder, `+0.4%` Crit Chance, dan `+0.8%` Crit Damage per poin.
+  - **Wind**: `+1%` damage Ninjutsu Wind, `+0.4%` Dodge Chance, dan `+1` Agility per poin.
+  - **Water**: `+1%` damage Ninjutsu Water, `+30` Max CP, `+1%` Healing Bonus, dan `0.4%/poin` peluang **Purify** di awal giliran.
+  - **Earth**: `+1%` damage Ninjutsu Earth, `+30` Max HP, dan `0.4%/poin` peluang **Reactive Force** (memantulkan 30% damage).
+- **Sistem Buff & Debuff Resmi** (`skill-effect.json` & `enemy.json`): Stun, Sleep, Frozen, Petrify, Prison, Fear, Chaos, Restriction, Meridian Seal, Burn/Blaze, Poison, Bleeding, Strengthen, Protection, Flexible, Concentration, Slow/Muddy, Agility+, CP Shield, Lightning Armor, Fire Wall, Bloodfeed, Purify, Disperse, dll.
+- **Atribut Musuh Asli** (`enemy.json`): HP, CP, Agility, Dodge, Critical, Accuracy, Purify, Reactive Force, Combustion, serta damage & cooldown tiap jurus boss.
 
-- ✅ **tested**
-- 🔒 Only updated with **verified and stable features**
-
-Use this branch if you want the **most reliable version of the project**.
-
----
-
-### 🧪 `dev` — Development
-
-> **Latest features, but not always stable**
-
-- 🧩 Contains **new features and experiments**
-- ⚠️ May include **bugs or breaking changes**
-- 🔄 Updated **frequently**
-
-Use this branch if you want to **test new functionality or contribute to development**.
-
----
-
-## Requirements
-
-- [Laragon](https://laragon.org) (includes Apache, MySQL, PHP)
-- PHP 8.4+
-- Composer
-- Node.js 18+ and npm
-- Git
+### 🏘️ Fitur Village Hub (Mobile App)
+- **Missions**: Pertarungan 1–3 musuh dengan reward XP, Gold, dan Level Up.
+- **Shop, Gear & Stats**: Beli & equip Weapon, Clothing, Back Item, Jutsu, serta alokasi Attribute Points.
+- **Pet House**: 142 pet asli lengkap dengan live preview SWF, Buy, Equip, dan Unequip.
+- **Advance Academy**: Upgrade jutsu per elemen (`Fire`, `Wind`, `Thunder`, `Earth`, `Water`, `Genjutsu`).
+- **Hunting House**: 5 Zona Boss asli, klaim Daily Kari Badge, Boss Hunt 36 FPS, dan Hunting Market Forge.
+- **Forge (Blacksmith)**: 65 resep tempa senjata resmi menggunakan Gold atau Tokens.
+- **Talent Hall**: Extreme & Secret Talent discovery serta upgrade skill menggunakan TP (Lv. 1–10).
+- **Live PvP Arena (`:3000`) & World Chat (`:3002`)**.
+- **All Game Assets Explorer**: Akses langsung ke 7.459+ aset SWF asli (11 kategori) dan audio MP3.
 
 ---
 
-## Setup
+## 📋 Prasyarat
 
-### 1. Install Laragon
-
-Download and install [Laragon](https://laragon.org/download). The default install path is `C:\laragon`.
-
-Start Laragon and make sure Apache and MySQL are both running.
+- **Docker** & **Docker Compose** (direkomendasikan untuk menjalankan semua server sekaligus)
+- **Node.js 20+** & **npm** (untuk menjalankan aplikasi mobile Expo)
+- **Expo Go** di HP Android/iOS (terhubung ke jaringan Wi-Fi / LAN yang sama dengan server)
 
 ---
 
-### 2. Place the Server Files
+## 🚀 Cara Menjalankan Project
 
-Copy the `Database/Laragon/ninjasage` folder into Laragon's web root:
-
-```
-C:\laragon\www\ninjasage\
-```
-
-Your folder structure should look like:
-
-```
-C:\laragon\www\ninjasage\
-  app\
-  config\
-  database\
-  public\
-  chat-server\
-  pvp-server\
-  ...
-```
-
----
-
-### 3. Configure Virtual Hosts
-
-Copy the config files from `Database/apache2 sites/` into Laragon's Apache vhosts folder:
-
-```
-C:\laragon\etc\apache2\sites-enabled\
-```
-
-Files to copy:
-- `00-default.conf`
-- `auto.ninjasage.test.conf`
-- `clan.ninjasage.id.conf`
-- `crew.ninjasage.id.conf`
-
-#### Copy the SSL certificates
-
-The `clan` and `crew` vhosts use per-domain SSL certificates included in the repo. Copy all four files from `Database/etc/ssl/` into Laragon's SSL folder:
-
-```
-C:\laragon\etc\ssl\
-```
-
-Files to copy:
-- `clan.ninjasage.id.pem`
-- `clan.ninjasage.id-key.pem`
-- `crew.ninjasage.id.pem`
-- `crew.ninjasage.id-key.pem`
-
-Then enable SSL: in the Laragon window, right-click the **Apache** entry and select **SSL → Enable**. Laragon will restart Apache automatically.
-
-#### Troubleshooting: Apache fails to start after copying vhost configs
-
-**Error: `Cannot access directory .../ninjasage/logs/`**
-
-Apache requires the log directory to exist before it will start. Create it manually:
-
-```
-C:\laragon\www\ninjasage\logs\
-```
-
----
-
-### 4. Update the Windows Hosts File
-
-Open `C:\Windows\System32\drivers\etc\hosts` as **Administrator** and add these lines:
-
-```
-127.0.0.1 ninjasage.test       #laragon magic!
-127.0.0.1 clan.ninjasage.id
-127.0.0.1 crew.ninjasage.id
-```
-
-> Without these entries, the virtual host domains will not resolve on your machine.
-
-The main site will be available at: `https://ninjasage.test`
-
----
-
-### 5. Configure the Laravel Environment
-
-Inside `C:\laragon\www\ninjasage\`, copy the example env file and edit it:
+### 1. Clone Repository
 
 ```bash
-cp .env.example .env
+git clone https://github.com/madicemerlang/Ninja-Saga-Private-Server.git
+cd Ninja-Saga-Private-Server
 ```
 
-Open `.env` and set your database credentials:
+---
+
+### 2. Konfigurasi Environment Docker
+
+Salin file contoh `.env.docker.example` menjadi `.env` di root repository:
+
+```bash
+cp .env.docker.example .env
+```
+
+Edit `.env` dan ganti `192.168.1.10` dengan **IP LAN komputer/server Anda** (cek via `ip a` di Linux/Mac atau `ipconfig` di Windows):
 
 ```env
-APP_NAME=NinjaSage
-APP_URL=https://ninjasage.test
+HTTP_PORT=8080
+MYSQL_PORT=3306
+PVP_PORT=3000
+CHAT_PORT=3002
 
-DB_CONNECTION=mysql
-DB_HOST=127.0.0.1
-DB_PORT=3306
+APP_ENV=local
+APP_DEBUG=true
+APP_URL=http://<IP_LAN_ANDA>:8080
+
 DB_DATABASE=ninjasage
-DB_USERNAME=root
-DB_PASSWORD=
+DB_PASSWORD=ninjasage_secret
 
-CHAT_ADMIN_SECRET=your_secret_here
+PVP_SOCKET_URL=http://<IP_LAN_ANDA>:3000/pvp
+CHAT_SOCKET_URL=http://<IP_LAN_ANDA>:3002
+CHAT_ADMIN_SECRET=change-me-to-a-random-secret
 ```
 
-> By default Laragon's MySQL uses `root` with no password.
-
-> **PHP version:** Make sure Laragon is using PHP 8.4 or later. You can switch PHP versions from the Laragon tray menu.
+> Juga pastikan `Database/Laragon/ninjasage/.env` sudah ada (jika belum, jalankan `cp Database/Laragon/ninjasage/.env.example Database/Laragon/ninjasage/.env`).
 
 ---
 
-### 6. Install PHP Dependencies
-
-In the Laragon window, click **Start All** to start Apache and MySQL before continuing.
-
-Open a terminal in `C:\laragon\www\ninjasage\` and run:
+### 3. Jalankan Semua Server Backend via Docker
 
 ```bash
-composer install
-php artisan key:generate
+docker compose up -d --build
 ```
 
-#### Troubleshooting: composer lock file error
+Perintah ini otomatis menyalakan 5 container:
 
-If you see this error:
+| Service | Container | Port | Fungsi |
+| :--- | :--- | :--- | :--- |
+| `nginx` | `ninjasage-nginx` | `8080` | Web server, REST API Mobile, Ruffle WASM, SWF & Game Data |
+| `app` | `ninjasage-app` | internal | PHP-FPM Laravel + Python `swf_builder.py` |
+| `mysql` | `ninjasage-mysql` | `3306` | Database MySQL 8.0 |
+| `pvp-server` | `ninjasage-pvp` | `3000` | Socket.IO Live PvP Server |
+| `chat-server` | `ninjasage-chat` | `3002` | Socket.IO World & Clan Chat Server |
 
+#### Inisialisasi Laravel & Database (Pertama Kali Saja)
+
+```bash
+docker exec -it ninjasage-app composer install
+docker exec -it ninjasage-app php artisan key:generate
+docker exec -it ninjasage-app php artisan migrate --seed
 ```
-Your lock file does not contain a compatible set of packages. Please run composer update.
+
+#### Verifikasi Server Berjalan
+
+```bash
+curl http://127.0.0.1:8080/api/v1/health
+curl http://127.0.0.1:8080/api/v1/assets/catalog
 ```
 
-A required PHP extension is likely disabled. The most common fix is enabling the `zip` extension:
-
-1. Open your active `php.ini`. It will be something like:
-   ```
-   C:\laragon\bin\php\php-8.4.x-Win32-vs17-x64\php.ini
-   ```
-2. Find the line:
-   ```
-   ;extension=zip
-   ```
-3. Remove the semicolon so it reads:
-   ```
-   extension=zip
-   ```
-4. Save the file and restart Laragon (or reload PHP from the tray menu).
-5. Run `composer install` again.
+**Admin Panel**: `http://<IP_LAN_ANDA>:8080/admin/login`
+- Email default: `admin@admin.test`
+- Password default: `admin`
 
 ---
 
-### 7. Create the Database
+### 4. Jalankan Aplikasi Mobile (Expo)
 
-Create the database using the Laragon terminal:
-
-```bash
-mysql -u root -e "CREATE DATABASE ninjasage;"
-```
-
-Then run the migrations and seed the initial data:
+Buka terminal baru dan masuk ke folder `mobile-app`:
 
 ```bash
-php artisan migrate
-php artisan db:seed
-```
-
-Once complete, verify the admin panel is working by visiting:
-
-```
-https://ninjasage.test/admin/login
-```
-
-Default credentials:
-
-| Field    | Value            |
-|----------|------------------|
-| Email    | admin@admin.test |
-| Password | admin            |
-
----
-
-### 8. Set Up the Chat Server
-
-Open a new terminal and navigate into the chat server folder:
-
-```bash
-cd C:\laragon\www\ninjasage\chat-server
+cd mobile-app
 npm install
 ```
 
-Copy the example env file and edit it:
+Jalankan Expo Metro Bundler dengan alamat IP server Anda:
 
 ```bash
-cp .env.example .env
+EXPO_PUBLIC_API_BASE_URL=http://<IP_LAN_ANDA>:8080 npx expo start
 ```
 
-```env
-PORT=3002
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_NAME=ninjasage
-DB_USER=root
-DB_PASS=
-CHAT_ADMIN_SECRET=your_secret_here
-```
+> Atau Anda bisa langsung menjalankan `npx expo start` lalu mengubah **Server URL** di layar Login aplikasi.
 
-> `CHAT_ADMIN_SECRET` must match the value you set in the Laravel `.env`.
+1. Buka aplikasi **Expo Go** di HP Android/iOS (pastikan 1 jaringan Wi-Fi dengan server).
+2. Scan QR Code yang muncul di terminal.
+3. Login / Register akun baru, buat karakter ninja, dan mulai bermain!
 
-Start the chat server:
+#### Cek TypeScript (Opsional untuk Development)
 
 ```bash
-npm start
-```
-
-You should see:
-
-```
-> chat-server@1.0.0 start
-> node index.js
-
-[Chat] Flash socket policy server listening on port 843
-[MessageStore] chat_messages table ready
-[Chat] Socket.IO server listening on port 3002
-[Chat] Namespaces: /global-chat, /clan-chat
+cd mobile-app
+npm run typecheck
 ```
 
 ---
 
-### 9. Set Up the PvP Server
+## 📁 Struktur Repository
 
-Open another new terminal and navigate into the PvP server folder:
-
-```bash
-cd C:\laragon\www\ninjasage\pvp-server
-npm install
+```text
+Ninja-Saga-Private-Server/
+├── docker-compose.yml              # Orkestrasi MySQL, PHP-FPM, Nginx, PvP, Chat
+├── .env.docker.example             # Template environment Docker
+├── docker/                         # Dockerfile PHP+Python & konfigurasi Nginx
+├── Custom Client/
+│   └── NS Custom Client V1/        # 7.459+ aset SWF & audio asli Ninja Saga
+├── Database/
+│   └── Laragon/ninjasage/          # Backend Laravel, AMF Services, game_data JSON,
+│       ├── app/Http/Controllers/Api/   # MobileAuth, MobileGame, SwfAssetController
+│       ├── scripts/swf_builder.py      # Compiler SWF 36 FPS Unified Battle Stage
+│       ├── public/game_data/           # skills, skill-effect, enemy, pet, talents, library
+│       ├── public/ruffle/              # Self-hosted Ruffle WASM runtime
+│       ├── public/audio/               # bgm.mp3, battle.mp3, click.mp3, xmas.mp3
+│       ├── pvp-server/                 # Node.js Socket.IO PvP Server (:3000)
+│       └── chat-server/                # Node.js Socket.IO Chat Server (:3002)
+└── mobile-app/                     # Aplikasi Mobile React Native (Expo + TypeScript)
+    └── src/
+        ├── api/                    # REST/RPC Client & Game Data loader
+        ├── engine/battleEngine.ts  # Combat, Agility Timeline, Buff/Debuff, Enemy stats
+        ├── stage/                  # Ruffle WebView bridge
+        └── screens/                # Battle, VillageHub, Pet, Academy, Hunting, Forge, Talent, PvP, Chat
 ```
-
-Copy the example env file and edit it:
-
-```bash
-cp .env.example .env
-```
-
-```env
-PORT=3000
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_NAME=ninjasage
-DB_USER=root
-DB_PASS=
-```
-
-Start the PvP server:
-
-```bash
-npm start
-```
-
-You should see:
-
-```
-> pvp-server@1.0.0 start
-> node index.js
-
-[SkillData] loaded 1158 skills, 833 skill-effect entries
-[PVP] Socket.IO server listening on port 3000
-[PVP] Namespace: /pvp
-[PVP] Turn duration: 30s
-[PVP] Max rounds: 50
-```
-
-> The chat and PvP servers are optional — the main server works without them, but those features will not be functional.
 
 ---
 
-## Running All Servers
+## 🛠️ Troubleshooting
 
-You need three things running at the same time:
-
-| Service        | How to start                      | Port |
-|----------------|-----------------------------------|------|
-| Apache + MySQL | Laragon tray icon → Start All     | 80   |
-| Chat Server    | `npm start` inside `chat-server\` | 3002 |
-| PvP Server     | `npm start` inside `pvp-server\`  | 3000 |
-
----
-
-## Launching the Game
-
-Run `NSCUSTOM.exe` from `Custom Client/NS Custom Client V1/`.
-
-Default game login:
-
-| Field    | Value |
-|----------|-------|
-| Username | Admin |
-| Password | Admin |
-
-To manage accounts, items, skills, and other game data, use the admin panel:
-
-```
-https://ninjasage.test/admin
-```
-
-| Field    | Value            |
-|----------|------------------|
-| Email    | admin@admin.test |
-| Password | admin            |
-
----
-
-## Custom Client Tools
-
-To rebuild or patch the client, use the Python tools in the `QoL Tools/` folder:
-
-- `CustomClientBuilder.py` — builds the client package
-- `ninjasage_patcher.py` — patches the SWF to point to your server
-- `gamedata_converter.py` — converts game data files
-
----
-
-## Useful Artisan Commands
-
-Open a terminal in the server folder and run `php artisan tinker` to interact with the database directly.
-
-See `Database/Laragon/ninjasage/Documentation/Commands.txt` for example commands to add items, skills, pets, and more to characters.
-
----
-
-## Special Features
-
-You can replay Ninja exams by setting your character level to one of the following:
-
-| Exam Type             | Level |
-|-----------------------|-------|
-| Chunin Exam           | 101   |
-| Jounin Exam           | 102   |
-| Special Jounin Exam   | 103   |
-| Tutor Exam            | 104   |
-
-> **Tip:** Set your level to the corresponding value to unlock and replay the exam of your choice.
+- **HP tidak bisa konek ke Server URL (`http://<IP_LAN>:8080`)**:
+  - Pastikan HP dan PC/server berada di jaringan Wi-Fi/LAN yang sama.
+  - Pastikan firewall mengizinkan port `8080`, `3000`, dan `3002`.
+- **Animasi SWF masih menampilkan versi lama setelah update `swf_builder.py`**:
+  - Bersihkan cache SWF di server:
+    ```bash
+    rm -f Database/Laragon/ninjasage/storage/app/swf_cache/battle_*.swf
+    ```
+- **Menjalankan dengan Laragon (Windows tanpa Docker)**:
+  - Salin `Database/Laragon/ninjasage` ke `C:\laragon\www\ninjasage`, aktifkan PHP 8.4+ dan ekstensi `zip`, jalankan `composer install`, `php artisan key:generate`, `php artisan migrate --seed`, lalu jalankan `npm start` di folder `chat-server` dan `pvp-server`.
