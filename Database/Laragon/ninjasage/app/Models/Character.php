@@ -166,6 +166,7 @@ class Character extends Model
 
             if ($this->xp >= $required) {
                 $this->level++;
+                $this->point_free = (int) $this->point_free + 1;
                 $levelUp = true;
             } else {
                 break;

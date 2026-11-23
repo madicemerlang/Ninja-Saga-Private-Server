@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+mobile-app/node_modules/
+mobile-app/.expo/
+mobile-app/dist/
+mobile-app/web-build/
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+Database/Laragon/ninjasage/.env
+
+# Build caches & runtime artifacts
+Database/Laragon/ninjasage/storage/app/swf_cache/
+Database/Laragon/ninjasage/logs/*.log
+Database/Laragon/ninjasage/scripts/__pycache__/
+__pycache__/
+*.pyc
+
+# Reference APK / local large binaries
+Ninja Horizon.apk
+*.apk
+*.aab
+*.ipa
+
+# OS / IDE
+.DS_Store
+Thumbs.db

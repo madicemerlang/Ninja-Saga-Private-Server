@@ -1,21 +1,17 @@
 'use strict';
 
 const SkillData = require('../SkillData');
+const ItemData  = require('../ItemData');
 
 /**
  * Server-side stat calculator.
- * Mirrors the formulas in the client's StatManager.as / EffectsManager.as.
+ * Canonical Ninja Saga formulas:
  *
- * HP        = 60 + level * 40  + point_earth     * 30
- * CP        = 60 + level * 40  + point_water      * 30
- * agility   = 9  + level       + point_wind
- * critical% = 5  + point_lightning * 0.4
- * dodge%    = 5  + point_wind  * 0.4
- *
- * ATK / DEF are derived server-side so that weapon attacks scale sensibly.
- * Skill damage uses the raw skill_damage value from SkillLibrary (skills.bin)
- * boosted by the attacker's elemental attributes matching the skill's type,
- * mirroring the client's EffectsManager.increaseDamage() logic.
+ * • Earth: +30 max HP per point
+ * • Water: +30 max CP per point, +1% healing bonus, 0.4% purify chance
+ * • Wind:  +0.4% dodge chance and +1 agility per point
+ * • Thunder: +0.4% critical chance and +0.8% critical strike damage bonus per point
+ * • Fire:  +0.4% extra damage to all damage types per point, 0.4% chance for Combustion (+30% DMG)
  */
 function buildStats(char) {
   const lvl        = parseInt(char.level,           10) || 1;
@@ -25,17 +21,24 @@ function buildStats(char) {
   const lightning  = parseInt(char.point_lightning, 10) || 0;
   const fire       = parseInt(char.point_fire,      10) || 0;
 
+  const weaponId     = char.equipment_weapon || 'wpn_01';
+  const weaponDamage = ItemData.getWeaponDamage(weaponId);
+
+  // Earth: +30 max HP per point
   const maxHp  = 60 + lvl * 40 + earth * 30;
+
+  // Water: +30 max CP per point
   const maxCp  = 60 + lvl * 40 + water * 30;
-  const agility  = 9 + lvl + wind;
-  const critPct  = parseFloat((5 + lightning * 0.4).toFixed(1));   // %
-  const dodgePct = parseFloat((5 + wind      * 0.4).toFixed(1));   // %
 
-  // Attack power: fire and lightning are offensive elements
-  const atk = Math.floor(lvl * 5 + (fire + lightning) * 2);
+  // Wind: +1 agility per point, +0.4% dodge chance per point
+  const agility  = 9 + lvl + wind * 1;
+  const dodgePct = parseFloat(Math.min(60, 5 + wind * 0.4).toFixed(1));   // %
 
-  // Defense: earth and water are defensive elements
-  const def = Math.floor(lvl * 2 + (earth + water));
+  // Thunder: +0.4% critical chance per point
+  const critPct  = parseFloat(Math.min(70, 5 + lightning * 0.4).toFixed(1));   // %
+
+  const baseAtk = weaponDamage > 0 ? weaponDamage : 5;
+  const def = Math.floor(lvl * 1.0);
 
   return {
     maxHp,
@@ -45,9 +48,10 @@ function buildStats(char) {
     agility,
     critPct,
     dodgePct,
-    atk,
+    atk:      baseAtk,
     def,
-    // Raw elemental points – kept for skill-type damage bonuses
+    lvl,
+    weaponDamage,
     fire,
     lightning,
     wind,
@@ -92,48 +96,48 @@ function calcEffectiveDodge(defenderStats, attackerStats) {
 
 /**
  * Calculate weapon-attack damage.
- * Returns { damage, crit, dodged }.
+ * Rule: Basic weapon attacks deal the weapon's listed damage with a -20% to +20% damage variance.
+ * Fire secondary: +0.4% all damage per point, 0.4% chance for Combustion (+30% DMG)
+ * Thunder secondary: +0.8% critical strike damage bonus per point
+ * Returns { damage, crit, dodged, combustion }.
  */
 function calcWeaponDamage(attackerStats, defenderStats) {
   // Check dodge first (factoring in active buff/debuff modifiers)
   if (Math.random() * 100 < calcEffectiveDodge(defenderStats, attackerStats)) {
-    return { damage: 0, crit: false, dodged: true };
+    return { damage: 0, crit: false, dodged: true, combustion: false };
   }
 
-  // Base damage with ±20% variance
-  const variance = 0.8 + Math.random() * 0.4;
-  let damage = Math.floor(attackerStats.atk * variance);
+  // Listed weapon damage with -20% to +20% variance
+  const listedDmg = attackerStats.weaponDamage > 0 ? attackerStats.weaponDamage : 5;
+  const variance = 0.80 + Math.random() * 0.40;
 
-  // Defense reduction (diminishing returns)
-  const defReduction = Math.floor(defenderStats.def * 0.5);
-  damage = Math.max(1, damage - defReduction);
+  // Fire secondary: +0.4% all damage & 0.4% chance per point for Combustion (+30% all damage for 1 turn)
+  const fireAllDmgMult = 1.0 + (attackerStats.fire * 0.004);
+  const combustionRoll = Math.random() < (attackerStats.fire * 0.004);
+  const combustionMult = combustionRoll ? 1.30 : 1.0;
+
+  // Thunder secondary: +0.8% critical strike damage bonus per point
+  const crit = Math.random() * 100 < attackerStats.critPct;
+  const critMult = crit ? (1.50 + attackerStats.lightning * 0.008) : 1.0;
+
+  let damage = Math.round(listedDmg * variance * fireAllDmgMult * combustionMult * critMult);
 
   // Apply active buff/debuff modifiers
   damage = applyDamageModifiers(damage, attackerStats, defenderStats);
 
-  // Critical hit
-  const crit = Math.random() * 100 < attackerStats.critPct;
-  if (crit) {
-    const critMult = 1 + (50 + attackerStats.lightning * 0.8) / 100;
-    damage = Math.floor(damage * critMult);
-  }
-
-  return { damage, crit, dodged: false };
+  return { damage: Math.max(1, damage), crit, dodged: false, combustion: combustionRoll };
 }
 
 /**
  * Calculate skill damage.
  *
- * Uses the actual skill_damage value from skills.bin as the base, then applies
- * elemental multipliers that mirror the client's
- * EffectsManager.increaseFromPassiveEffects_Element_Multiplicative():
+ * Rule:
+ *   - Each point invested in an element grants +1% extra damage to Ninjutsu of that matching element.
+ *   - Fire: +0.4% all damage per point, 0.4% chance per point for Combustion (+30% DMG)
+ *   - Thunder: +0.8% critical strike damage bonus per point
+ *   - Base damage from skills.bin / skills.json with -20% to +20% variance
  *
- *   - Fire always adds (fire * 0.4)% multiplicatively.
- *   - The skill's type adds the matching element's points as an extra % bonus:
- *       type 1 → wind%, type 2 → fire%, type 3 → lightning%,
- *       type 4 → earth%, type 5 → water%
- *
- * Returns { damage, crit, dodged }.
+ * Returns { damage, crit, dodged, combustion }.
  */
 function calcSkillDamage(attackerStats, defenderStats, skillId) {
   const skill     = SkillData.getSkill(skillId);
@@ -141,43 +145,38 @@ function calcSkillDamage(attackerStats, defenderStats, skillId) {
 
   // Skills are harder to dodge (50 % of normal dodge chance)
   if (Math.random() * 100 < calcEffectiveDodge(defenderStats, attackerStats) * 0.5) {
-    return { damage: 0, crit: false, dodged: true };
+    return { damage: 0, crit: false, dodged: true, combustion: false };
   }
 
-  // Base damage: use skill_damage from data; fall back to atk-based estimate
-  const base = skill.skill_damage > 0 ? skill.skill_damage : Math.floor(attackerStats.atk * 0.5);
+  // Ninjutsu Base Damage from skills.bin with -20% to +20% variance
+  const skBase   = skill.skill_damage > 0 ? skill.skill_damage : 20;
+  const variance = 0.80 + Math.random() * 0.40;
 
-  // Elemental multiplier – mirrors client EffectsManager logic
-  let elementMult = 1.0;
-  elementMult += (attackerStats.fire * 0.4) / 100;   // fire passive always applies
-
+  // Matching elemental bonus: +1% extra damage to Ninjutsu of that matching element
+  let matchingElemMult = 1.0;
   switch (skillType) {
-    case 1: elementMult += attackerStats.wind      / 100; break;
-    case 2: elementMult += attackerStats.fire      / 100; break;
-    case 3: elementMult += attackerStats.lightning / 100; break;
-    case 4: elementMult += attackerStats.earth     / 100; break;
-    case 5: elementMult += attackerStats.water     / 100; break;
+    case 1: matchingElemMult += (attackerStats.wind      * 0.01); break;
+    case 2: matchingElemMult += (attackerStats.fire      * 0.01); break;
+    case 3: matchingElemMult += (attackerStats.lightning * 0.01); break;
+    case 4: matchingElemMult += (attackerStats.earth     * 0.01); break;
+    case 5: matchingElemMult += (attackerStats.water     * 0.01); break;
   }
 
-  // ±15% variance
-  const variance = 0.85 + Math.random() * 0.3;
-  let damage = Math.floor(base * variance * elementMult);
+  // Fire secondary: +0.4% all damage & 0.4% chance per point for Combustion (+30% DMG)
+  const fireAllDmgMult = 1.0 + (attackerStats.fire * 0.004);
+  const combustionRoll = Math.random() < (attackerStats.fire * 0.004);
+  const combustionMult = combustionRoll ? 1.30 : 1.0;
 
-  // Defense reduction (skills penetrate more than weapon attacks)
-  const defReduction = Math.floor(defenderStats.def * 0.3);
-  damage = Math.max(1, damage - defReduction);
+  // Thunder secondary: +0.8% critical strike damage bonus per point
+  const crit = Math.random() * 100 < attackerStats.critPct;
+  const critMult = crit ? (1.50 + attackerStats.lightning * 0.008) : 1.0;
+
+  let damage = Math.round(skBase * variance * matchingElemMult * fireAllDmgMult * combustionMult * critMult);
 
   // Apply active buff/debuff modifiers
   damage = applyDamageModifiers(damage, attackerStats, defenderStats);
 
-  // Critical hit (base 50 % bonus + extra from lightning, mirrors calculateCriticalDamage)
-  const crit = Math.random() * 100 < attackerStats.critPct;
-  if (crit) {
-    const critMult = 1 + (50 + attackerStats.lightning * 0.8) / 100;
-    damage = Math.floor(damage * critMult);
-  }
-
-  return { damage, crit, dodged: false };
+  return { damage: Math.max(1, damage), crit, dodged: false, combustion: combustionRoll };
 }
 
 /**

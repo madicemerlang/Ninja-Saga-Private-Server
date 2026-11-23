@@ -280,9 +280,21 @@ class Battle {
     const opponent = this._getOpponent(this._activeParticipant);
 
     // Apply per-turn buff/debuff effects (DoT, HoT, CoT) for the ACTIVE participant only.
-    // Effects tick once per the affected player's own turn — ticking both players every
-    // half-turn would halve all durations (a 3-turn stun would last only 1 stunned turn).
-    const turnOverlays = this._applyPerTurnEffects(this._activeParticipant, opponent);
+    // Water Secondary: 0.4% chance per point to purify negative effects at the start of a turn.
+    const turnOverlays = [];
+    if (Math.random() < (this._activeParticipant.stats.water * 0.004)) {
+      const hadDebuff = this._activeParticipant.buffs.some(b => b.type === 'Debuff');
+      if (hadDebuff) {
+        this._activeParticipant.buffs = this._activeParticipant.buffs.filter(b => b.type !== 'Debuff');
+        turnOverlays.push({
+          id: this._activeParticipant.character.id,
+          icon: 'b',
+          txt: 'PURIFIED',
+          color: 65535,
+        });
+      }
+    }
+    turnOverlays.push(...this._applyPerTurnEffects(this._activeParticipant, opponent));
 
     // Capture skip-effect state BEFORE decrementing durations so that a buff
     // with duration=1 still causes one full forced-skip before being removed.
@@ -410,9 +422,18 @@ class Battle {
     attacker.stats.activeBuffs = attacker.buffs;
     defender.stats.activeBuffs = defender.buffs;
 
-    const { damage, crit, dodged } = StatsCalc.calcWeaponDamage(attacker.stats, defender.stats);
+    const { damage, crit, dodged, combustion } = StatsCalc.calcWeaponDamage(attacker.stats, defender.stats);
 
     const extraOverlays = [];
+
+    // Weapon Attacks: Basic weapon attacks restore 5% CP whether the attack hits or misses.
+    const cpRestore = Math.max(1, Math.round(attacker.stats.maxCp * 0.05));
+    attacker.stats.cp = Math.min(attacker.stats.maxCp, attacker.stats.cp + cpRestore);
+    extraOverlays.push({ id: attacker.character.id, icon: 'b', txt: `+${cpRestore}CP`, color: 65280 });
+
+    if (combustion) {
+      extraOverlays.push({ id: attacker.character.id, icon: 'b', txt: 'COMBUSTION', color: 16753920 });
+    }
 
     if (!dodged && damage > 0) {
       if (this._hasActiveEffect(defender, 'serene_mind')) {
@@ -441,6 +462,14 @@ class Battle {
               defender.stats.hp = Math.min(defender.stats.maxHp, defender.stats.hp + absorbed);
             }
           }
+        }
+
+        // Earth Secondary: 0.4% chance per point for Reactive Force (dealing 30% of damage taken back to the attacker)
+        if (Math.random() < (defender.stats.earth * 0.004)) {
+          const reflectDmg = Math.max(1, Math.round(damage * 0.30));
+          attacker.stats.hp = Math.max(0, attacker.stats.hp - reflectDmg);
+          extraOverlays.push({ id: defender.character.id, icon: 'b', txt: 'REACTIVE', color: 16753920 });
+          extraOverlays.push({ id: attacker.character.id, icon: 'd', txt: `-${reflectDmg}`, color: 16711680 });
         }
 
         // bloodfeed: attacker life steal (applies to any non-reflected damage)
@@ -562,9 +591,12 @@ class Battle {
     attacker.stats.activeBuffs = attacker.buffs;
     defender.stats.activeBuffs = defender.buffs;
 
-    const { damage, crit, dodged } = StatsCalc.calcSkillDamage(attacker.stats, defender.stats, skillId);
+    const { damage, crit, dodged, combustion } = StatsCalc.calcSkillDamage(attacker.stats, defender.stats, skillId);
 
     const extraOverlays = [];
+    if (combustion) {
+      extraOverlays.push({ id: attacker.character.id, icon: 'b', txt: 'COMBUSTION', color: 16753920 });
+    }
 
     if (!dodged && damage > 0) {
       if (this._hasActiveEffect(defender, 'serene_mind')) {
@@ -592,6 +624,14 @@ class Battle {
               defender.stats.hp = Math.min(defender.stats.maxHp, defender.stats.hp + absorbed);
             }
           }
+        }
+
+        // Earth Secondary: 0.4% chance per point for Reactive Force (dealing 30% of damage taken back to the attacker)
+        if (Math.random() < (defender.stats.earth * 0.004)) {
+          const reflectDmg = Math.max(1, Math.round(damage * 0.30));
+          attacker.stats.hp = Math.max(0, attacker.stats.hp - reflectDmg);
+          extraOverlays.push({ id: defender.character.id, icon: 'b', txt: 'REACTIVE', color: 16753920 });
+          extraOverlays.push({ id: attacker.character.id, icon: 'd', txt: `-${reflectDmg}`, color: 16711680 });
         }
 
         // bloodfeed: attacker life steal

@@ -11,11 +11,13 @@ const LobbyManager     = require('./src/LobbyManager');
 const RoomManager      = require('./src/RoomManager');
 const MatchmakingQueue = require('./src/MatchmakingQueue');
 const SkillData        = require('./src/SkillData');
+const ItemData         = require('./src/ItemData');
 
-// Load skill + skill-effect data from the compiled game-data bin files.
+// Load skill + skill-effect data and weapon library items
 // This must run before any Battle is created so that StatsCalc can look up
-// real CP costs, cooldowns, skill_damage values, and effect lists.
+// real CP costs, cooldowns, skill_damage values, weapon damages, and effect lists.
 SkillData.load();
+ItemData.load();
 
 // ─── HTTP server ───────────────────────────────────────────────────────────────
 const httpServer = createServer((req, res) => {
@@ -95,6 +97,7 @@ pvp.on('connection', (socket) => {
   // ── Matchmaking ─────────────────────────────────────────────────────────────
   socket.on('Battle.startMatchMaking', (data) => guardAuth(socket, () => matchmakingQueue.join(socket, data)));
   socket.on('Battle.stopMatchMaking',  ()     => guardAuth(socket, () => matchmakingQueue.leave(socket)));
+  socket.on('Battle.startPractice',     ()     => guardAuth(socket, () => roomManager.startPracticeBattle(socket)));
 
   // ── Battle start ────────────────────────────────────────────────────────────
   socket.on('Battle.start', (roomId) => guardAuth(socket, () => roomManager.startBattle(socket, roomId)));

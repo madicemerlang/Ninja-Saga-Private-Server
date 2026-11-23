@@ -1,0 +1,492 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\Character;
+use App\Models\Skill;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
+
+class SwfAssetController extends Controller
+{
+    private const ALLOWED_CATEGORIES = [
+        'consumables',
+        'enemy',
+        'essentials',
+        'items',
+        'materials',
+        'mission',
+        'npcs',
+        'pets',
+        'skills',
+        'sounds',
+        'swfpanels',
+    ];
+
+    public function catalog(): JsonResponse
+    {
+        $base = $this->basePath();
+        $categories = [];
+        $totalSwfs = 0;
+
+        foreach (self::ALLOWED_CATEGORIES as $cat) {
+            $dir = $base . DIRECTORY_SEPARATOR . $cat;
+            $count = 0;
+            if (is_dir($dir)) {
+                foreach (scandir($dir) ?: [] as $entry) {
+                    if ($entry !== '.' && $entry !== '..' && is_file($dir . DIRECTORY_SEPARATOR . $entry)) {
+                        $count++;
+                    }
+                }
+            }
+            $categories[$cat] = $count;
+            $totalSwfs += $count;
+        }
+
+        $audioDir = public_path('audio');
+        $audioFiles = [];
+        if (is_dir($audioDir)) {
+            foreach (scandir($audioDir) ?: [] as $entry) {
+                if (str_ends_with($entry, '.mp3')) {
+                    $audioFiles[] = $entry;
+                }
+            }
+        }
+
+        $gameDataDir = public_path('game_data');
+        $gameDataFiles = [];
+        if (is_dir($gameDataDir)) {
+            foreach (scandir($gameDataDir) ?: [] as $entry) {
+                if (str_ends_with($entry, '.json')) {
+                    $gameDataFiles[] = $entry;
+                }
+            }
+        }
+
+        return response()->json([
+            'status' => 1,
+            'total_assets' => $totalSwfs,
+            'categories' => $categories,
+            'audio' => $audioFiles,
+            'game_data' => $gameDataFiles,
+        ]);
+    }
+
+    public function index(string $category, Request $request): JsonResponse
+    {
+        if (!in_array($category, self::ALLOWED_CATEGORIES, true)) {
+            return response()->json(['error' => 'Invalid SWF category'], 404);
+        }
+
+        $dir = $this->basePath() . DIRECTORY_SEPARATOR . $category;
+        if (!is_dir($dir)) {
+            return response()->json(['error' => 'SWF directory not found', 'path' => $dir], 404);
+        }
+
+        $limit = min(max((int) $request->query('limit', 100), 1), 6000);
+        $prefix = (string) $request->query('prefix', '');
+
+        $files = [];
+        foreach (scandir($dir) ?: [] as $entry) {
+            if (!str_ends_with($entry, '.swf')) {
+                continue;
+            }
+            if ($prefix !== '' && !str_starts_with($entry, $prefix)) {
+                continue;
+            }
+            $files[] = $entry;
+            if (count($files) >= $limit) {
+                break;
+            }
+        }
+
+        return response()->json([
+            'category' => $category,
+            'count' => count($files),
+            'files' => $files,
+        ]);
+    }
+
+    public function show(string $category, string $filename, Request $request): BinaryFileResponse|JsonResponse
+    {
+        if (!in_array($category, self::ALLOWED_CATEGORIES, true)) {
+            return response()->json(['error' => 'Invalid SWF category'], 404);
+        }
+
+        if (!preg_match('/^[a-zA-Z0-9._-]+\.swf$/', $filename)) {
+            return response()->json(['error' => 'Invalid SWF filename'], 400);
+        }
+
+        $dir = $this->basePath() . DIRECTORY_SEPARATOR . $category;
+        $path = $dir . DIRECTORY_SEPARATOR . $filename;
+
+        if (!is_file($path) && $category === 'skills') {
+            $skillId = pathinfo($filename, PATHINFO_FILENAME);
+            $swfAlias = Skill::where('skill_id', $skillId)->value('swf');
+            $fallbackName = $swfAlias ? ($swfAlias . '.swf') : env('SKILL_DEFAULT_SWF', 'skill_01.swf');
+            $fallbackPath = $dir . DIRECTORY_SEPARATOR . $fallbackName;
+            if (is_file($fallbackPath)) {
+                $path = $fallbackPath;
+            }
+        }
+
+        if (!is_file($path)) {
+            return response()->json(['error' => 'SWF file not found'], 404);
+        }
+
+        $rawMode = (bool) $request->query('raw', false);
+        $anim = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $request->query('anim', 'standby')) ?: 'standby';
+        $stem = pathinfo($path, PATHINFO_FILENAME);
+
+        if (!$rawMode && in_array($category, ['enemy', 'npcs', 'pets'], true)) {
+            $cached = $this->compileEntitySwf($path, "{$category}_{$stem}_{$anim}.swf", $anim);
+            if ($cached) {
+                $path = $cached;
+            }
+        } elseif (!$rawMode && $category === 'skills') {
+            $cached = $this->compileSkillSwf($path, "skills_{$stem}_clean.swf");
+            if ($cached) {
+                $path = $cached;
+            }
+        }
+
+        return response()->file($path, [
+            'Content-Type' => 'application/x-shockwave-flash',
+            'Cache-Control' => 'no-cache, public',
+            'Access-Control-Allow-Origin' => '*',
+        ]);
+    }
+
+    public function player(int $charId, Request $request): BinaryFileResponse|JsonResponse
+    {
+        $anim = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $request->query('anim', 'standby')) ?: 'standby';
+        $char = Character::find($charId);
+
+        $gender = (int) ($char?->gender ?? 0);
+        $gSuffix = $gender === 0 ? '_0' : '_1';
+        $hair = (string) ($char?->hair_style ?: "hair_01{$gSuffix}");
+        $clothing = (string) ($char?->equipment_clothing ?: "set_01{$gSuffix}");
+        $weapon = (string) ($char?->equipment_weapon ?: 'wpn_01');
+        $back = (string) ($char?->equipment_back ?: 'back_01');
+
+        $baseSwf = storage_path('app/swf_base/player_base.swf');
+        $script = base_path('scripts/swf_builder.py');
+        $itemsDir = $this->basePath() . DIRECTORY_SEPARATOR . 'items';
+
+        if (!is_file($baseSwf)) {
+            $ninjaSageSwf = $this->basePath() . DIRECTORY_SEPARATOR . 'NinjaSage.swf';
+            if (is_file($ninjaSageSwf) && is_file($script)) {
+                $cmd = sprintf(
+                    'python3 %s extract-player-base %s %s 2>&1',
+                    escapeshellarg($script),
+                    escapeshellarg($ninjaSageSwf),
+                    escapeshellarg($baseSwf)
+                );
+                shell_exec($cmd);
+            }
+        }
+
+        if (!is_file($baseSwf)) {
+            return response()->json(['error' => 'player_base.swf could not be initialized'], 500);
+        }
+
+        $equipHash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}"), 0, 12);
+        $cacheDir = storage_path('app/swf_cache');
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+        $cachedPath = $cacheDir . DIRECTORY_SEPARATOR . "player_{$charId}_{$anim}_{$equipHash}.swf";
+
+        if (!is_file($cachedPath)) {
+            $cmd = sprintf(
+                'python3 %s build-player %s %s %s %s %d %s %s %s %s 2>&1',
+                escapeshellarg($script),
+                escapeshellarg($baseSwf),
+                escapeshellarg($itemsDir),
+                escapeshellarg($cachedPath),
+                escapeshellarg($anim),
+                $gender,
+                escapeshellarg($hair),
+                escapeshellarg($clothing),
+                escapeshellarg($weapon),
+                escapeshellarg($back)
+            );
+            shell_exec($cmd);
+        }
+
+        if (!is_file($cachedPath)) {
+            return response()->json(['error' => 'Failed compiling player SWF'], 500);
+        }
+
+        return response()->file($cachedPath, [
+            'Content-Type' => 'application/x-shockwave-flash',
+            'Cache-Control' => 'no-cache, public',
+            'Access-Control-Allow-Origin' => '*',
+        ]);
+    }
+
+    public function battle(int $charId, string $enemyId, Request $request): BinaryFileResponse|JsonResponse
+    {
+        $rawList = pathinfo($enemyId, PATHINFO_FILENAME);
+        $parts = array_slice(array_filter(array_map(function ($item) {
+            return preg_replace('/[^a-zA-Z0-9_-]/', '', trim($item));
+        }, explode(',', $rawList))), 0, 3);
+
+        if (empty($parts)) {
+            return response()->json(['error' => 'Invalid enemy ID'], 400);
+        }
+
+        $baseSwf = storage_path('app/swf_base/player_base.swf');
+        $script = base_path('scripts/swf_builder.py');
+        $itemsDir = $this->basePath() . DIRECTORY_SEPARATOR . 'items';
+        $skillsDir = $this->basePath() . DIRECTORY_SEPARATOR . 'skills';
+        $cacheDir = storage_path('app/swf_cache');
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+
+        $enemyPaths = [];
+        foreach ($parts as $ename) {
+            // Check if this enemy is an opponent player character (e.g. char_2 or p_2)
+            if (preg_match('/^(?:char|p)_?(\d+)$/i', $ename, $m)) {
+                $oppCharId = (int) $m[1];
+                $oppChar = Character::find($oppCharId);
+                $oppGender = (int) ($oppChar?->gender ?? 0);
+                $oppGSuffix = $oppGender === 0 ? '_0' : '_1';
+                $oppHair = (string) ($oppChar?->hair_style ?: "hair_01{$oppGSuffix}");
+                $oppClothing = (string) ($oppChar?->equipment_clothing ?: "set_01{$oppGSuffix}");
+                $oppWeapon = (string) ($oppChar?->equipment_weapon ?: 'wpn_01');
+                $oppBack = (string) ($oppChar?->equipment_back ?: '');
+                $oppHash = substr(md5("{$oppGender}|{$oppHair}|{$oppClothing}|{$oppWeapon}|{$oppBack}"), 0, 10);
+                $oppPlayerSwf = $cacheDir . DIRECTORY_SEPARATOR . "player_opp_{$oppCharId}_{$oppHash}.swf";
+
+                if (!is_file($oppPlayerSwf)) {
+                    $cmdOpp = sprintf(
+                        'python3 %s build-player %s %s %s standby %d %s %s %s %s 2>&1',
+                        escapeshellarg($script),
+                        escapeshellarg($baseSwf),
+                        escapeshellarg($itemsDir),
+                        escapeshellarg($oppPlayerSwf),
+                        $oppGender,
+                        escapeshellarg($oppHair),
+                        escapeshellarg($oppClothing),
+                        escapeshellarg($oppWeapon),
+                        escapeshellarg($oppBack)
+                    );
+                    shell_exec($cmdOpp);
+                }
+
+                if (is_file($oppPlayerSwf)) {
+                    $enemyPaths[] = $oppPlayerSwf;
+                    continue;
+                }
+            }
+
+            $ep = $this->basePath() . DIRECTORY_SEPARATOR . 'enemy' . DIRECTORY_SEPARATOR . $ename . '.swf';
+            if (!is_file($ep)) {
+                $ep = $this->basePath() . DIRECTORY_SEPARATOR . 'enemy' . DIRECTORY_SEPARATOR . 'ene_01.swf';
+            }
+            if (!is_file($ep)) {
+                return response()->json(['error' => 'Enemy SWF not found'], 404);
+            }
+            $enemyPaths[] = $ep;
+        }
+        $enemiesKey = implode('_', $parts);
+        $enemyPathsCsv = implode(',', $enemyPaths);
+
+        $char = Character::find($charId);
+        $gender = (int) ($char?->gender ?? 0);
+        $gSuffix = $gender === 0 ? '_0' : '_1';
+        $hair = (string) ($char?->hair_style ?: "hair_01{$gSuffix}");
+        $clothing = (string) ($char?->equipment_clothing ?: "set_01{$gSuffix}");
+        $weapon = (string) ($char?->equipment_weapon ?: 'wpn_01');
+        $back = (string) ($char?->equipment_back ?: 'back_01');
+        $skillsCsv = (string) ($request->query('skills') ?: $char?->equipment_skills ?: 'skill_01');
+
+        $baseSwf = storage_path('app/swf_base/player_base.swf');
+        $script = base_path('scripts/swf_builder.py');
+        $itemsDir = $this->basePath() . DIRECTORY_SEPARATOR . 'items';
+        $skillsDir = $this->basePath() . DIRECTORY_SEPARATOR . 'skills';
+
+        if (!is_file($baseSwf)) {
+            $ninjaSageSwf = $this->basePath() . DIRECTORY_SEPARATOR . 'NinjaSage.swf';
+            if (is_file($ninjaSageSwf) && is_file($script)) {
+                $cmd = sprintf(
+                    'python3 %s extract-player-base %s %s 2>&1',
+                    escapeshellarg($script),
+                    escapeshellarg($ninjaSageSwf),
+                    escapeshellarg($baseSwf)
+                );
+                shell_exec($cmd);
+            }
+        }
+
+        $hash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}|{$skillsCsv}"), 0, 12);
+        $cacheDir = storage_path('app/swf_cache');
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+        $cachedPath = $cacheDir . DIRECTORY_SEPARATOR . "battle_{$charId}_{$enemiesKey}_{$hash}.swf";
+
+        if (!is_file($cachedPath)) {
+            $cmd = sprintf(
+                'python3 %s build-battle %s %s %s %s %s %d %s %s %s %s %s 2>&1',
+                escapeshellarg($script),
+                escapeshellarg($baseSwf),
+                escapeshellarg($itemsDir),
+                escapeshellarg($enemyPathsCsv),
+                escapeshellarg($skillsDir),
+                escapeshellarg($cachedPath),
+                $gender,
+                escapeshellarg($hair),
+                escapeshellarg($clothing),
+                escapeshellarg($weapon),
+                escapeshellarg($back),
+                escapeshellarg($skillsCsv)
+            );
+            shell_exec($cmd);
+        }
+
+        if (!is_file($cachedPath)) {
+            return response()->json(['error' => 'Failed compiling unified battle SWF'], 500);
+        }
+
+        return response()->file($cachedPath, [
+            'Content-Type' => 'application/x-shockwave-flash',
+            'Cache-Control' => 'no-cache, public',
+            'Access-Control-Allow-Origin' => '*',
+        ]);
+    }
+
+    public function playerSkill(int $charId, string $skillId): BinaryFileResponse|JsonResponse
+    {
+        $skillName = preg_replace('/[^a-zA-Z0-9_-]/', '', pathinfo($skillId, PATHINFO_FILENAME));
+        if (!$skillName) {
+            return response()->json(['error' => 'Invalid skill ID'], 400);
+        }
+
+        $skillsDir = $this->basePath() . DIRECTORY_SEPARATOR . 'skills';
+        $itemsDir = $this->basePath() . DIRECTORY_SEPARATOR . 'items';
+        $skillPath = $skillsDir . DIRECTORY_SEPARATOR . $skillName . '.swf';
+
+        if (!is_file($skillPath)) {
+            $swfAlias = Skill::where('skill_id', $skillName)->value('swf');
+            $fallbackName = $swfAlias ? ($swfAlias . '.swf') : env('SKILL_DEFAULT_SWF', 'skill_01.swf');
+            $fallbackPath = $skillsDir . DIRECTORY_SEPARATOR . $fallbackName;
+            if (is_file($fallbackPath)) {
+                $skillPath = $fallbackPath;
+            }
+        }
+
+        if (!is_file($skillPath)) {
+            return response()->json(['error' => 'Skill SWF not found'], 404);
+        }
+
+        $char = Character::find($charId);
+        $gender = (int) ($char?->gender ?? 0);
+        $gSuffix = $gender === 0 ? '_0' : '_1';
+        $hair = (string) ($char?->hair_style ?: "hair_01{$gSuffix}");
+        $clothing = (string) ($char?->equipment_clothing ?: "set_01{$gSuffix}");
+        $weapon = (string) ($char?->equipment_weapon ?: 'wpn_01');
+        $back = (string) ($char?->equipment_back ?: 'back_01');
+
+        $equipHash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}"), 0, 12);
+        $cacheDir = storage_path('app/swf_cache');
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+        $cachedPath = $cacheDir . DIRECTORY_SEPARATOR . "pskill_{$charId}_{$skillName}_{$equipHash}.swf";
+
+        if (!is_file($cachedPath)) {
+            $script = base_path('scripts/swf_builder.py');
+            $cmd = sprintf(
+                'python3 %s build-player-skill %s %s %s %d %s %s %s %s 2>&1',
+                escapeshellarg($script),
+                escapeshellarg($skillPath),
+                escapeshellarg($itemsDir),
+                escapeshellarg($cachedPath),
+                $gender,
+                escapeshellarg($hair),
+                escapeshellarg($clothing),
+                escapeshellarg($weapon),
+                escapeshellarg($back)
+            );
+            shell_exec($cmd);
+        }
+
+        if (!is_file($cachedPath)) {
+            return response()->json(['error' => 'Failed compiling dressed skill SWF'], 500);
+        }
+
+        return response()->file($cachedPath, [
+            'Content-Type' => 'application/x-shockwave-flash',
+            'Cache-Control' => 'no-cache, public',
+            'Access-Control-Allow-Origin' => '*',
+        ]);
+    }
+
+    private function compileEntitySwf(string $inputPath, string $cacheName, string $anim): ?string
+    {
+        $script = base_path('scripts/swf_builder.py');
+        if (!is_file($script)) {
+            return null;
+        }
+        $cacheDir = storage_path('app/swf_cache');
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+        $cachedPath = $cacheDir . DIRECTORY_SEPARATOR . $cacheName;
+        if (!is_file($cachedPath)) {
+            $cmd = sprintf(
+                'python3 %s build-entity %s %s %s 2>&1',
+                escapeshellarg($script),
+                escapeshellarg($inputPath),
+                escapeshellarg($cachedPath),
+                escapeshellarg($anim)
+            );
+            shell_exec($cmd);
+        }
+        return is_file($cachedPath) ? $cachedPath : null;
+    }
+
+    private function compileSkillSwf(string $inputPath, string $cacheName): ?string
+    {
+        $script = base_path('scripts/swf_builder.py');
+        if (!is_file($script)) {
+            return null;
+        }
+        $cacheDir = storage_path('app/swf_cache');
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+        $cachedPath = $cacheDir . DIRECTORY_SEPARATOR . $cacheName;
+        if (!is_file($cachedPath)) {
+            $cmd = sprintf(
+                'python3 %s build-skill %s %s 2>&1',
+                escapeshellarg($script),
+                escapeshellarg($inputPath),
+                escapeshellarg($cachedPath)
+            );
+            shell_exec($cmd);
+        }
+        return is_file($cachedPath) ? $cachedPath : null;
+    }
+
+    private function basePath(): string
+    {
+        $configured = env('SWF_ASSETS_PATH');
+        if ($configured && is_dir($configured)) {
+            return rtrim($configured, DIRECTORY_SEPARATOR);
+        }
+
+        $dockerDefault = '/var/www/swf-assets';
+        if (is_dir($dockerDefault)) {
+            return $dockerDefault;
+        }
+
+        $repoDefault = realpath(base_path('../../../Custom Client/NS Custom Client V1'));
+        return $repoDefault ?: base_path('public');
+    }
+}

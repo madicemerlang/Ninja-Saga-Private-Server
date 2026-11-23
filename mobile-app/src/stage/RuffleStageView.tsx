@@ -1,0 +1,116 @@
+import React, { forwardRef, useImperativeHandle, useMemo, useRef } from 'react';
+import { StyleSheet, View } from 'react-native';
+import { WebView, type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
+import { DEFAULT_RUFFLE_SCRIPT_URL } from '../config/env';
+import { buildRuffleStageHtml } from './stageHtml';
+
+const TypedWebView = WebView as unknown as React.ComponentType<
+  WebViewProps & { ref?: React.Ref<WebView> }
+>;
+
+export type StageEvent =
+  | { type: 'BRIDGE_READY'; hasRuffle: boolean }
+  | { type: 'PRELOAD_DONE'; count: number }
+  | { type: 'STAGE_LOADING'; url: string }
+  | { type: 'STAGE_FETCHED'; url: string; bytes: number }
+  | { type: 'STAGE_READY'; url: string }
+  | { type: 'STAGE_CLEARED' }
+  | { type: 'ANIM_HIT' }
+  | { type: 'ANIM_DONE' }
+  | { type: 'HOLD_STATE'; held: boolean }
+  | { type: 'MEMORY_REPORT'; wasmHeapMB: number; memoryCount: number }
+  | { type: 'STAGE_ERROR'; message: string };
+
+export interface RuffleStageHandle {
+  loadSwf: (url: string) => void;
+  playSequence: (seq: string) => void;
+  preloadSwfs: (urls: string[]) => void;
+  setHoldFrames: (held: boolean) => void;
+  pumpFrame: () => void;
+  requestMemoryReport: () => void;
+  clearStage: () => void;
+}
+
+interface RuffleStageViewProps {
+  baseUrl?: string;
+  ruffleScriptUrl?: string;
+  onEvent?: (event: StageEvent) => void;
+}
+
+export const RuffleStageView = forwardRef<RuffleStageHandle, RuffleStageViewProps>(
+  function RuffleStageView(
+    {
+      baseUrl = 'http://192.168.101.170:8080/',
+      ruffleScriptUrl = DEFAULT_RUFFLE_SCRIPT_URL,
+      onEvent,
+    },
+    ref
+  ) {
+    const webViewRef = useRef<WebView>(null);
+
+    const html = useMemo(
+      () => buildRuffleStageHtml(ruffleScriptUrl),
+      [ruffleScriptUrl]
+    );
+
+    const sendCommand = (cmd: Record<string, unknown>) => {
+      const serialized = JSON.stringify(cmd);
+      webViewRef.current?.injectJavaScript(
+        `window.__stageCommand && window.__stageCommand(${serialized}); true;`
+      );
+    };
+
+    useImperativeHandle(ref, () => ({
+      loadSwf: (url: string) => sendCommand({ type: 'LOAD_SWF', url }),
+      playSequence: (seq: string) => sendCommand({ type: 'PLAY_SEQ', seq }),
+      preloadSwfs: (urls: string[]) => sendCommand({ type: 'PRELOAD_SWFS', urls }),
+      setHoldFrames: (held: boolean) => sendCommand({ type: 'HOLD_FRAMES', held }),
+      pumpFrame: () => sendCommand({ type: 'PUMP_FRAME' }),
+      requestMemoryReport: () => sendCommand({ type: 'GET_MEMORY' }),
+      clearStage: () => sendCommand({ type: 'CLEAR_STAGE' }),
+    }));
+
+    const handleMessage = (e: WebViewMessageEvent) => {
+      try {
+        const parsed = JSON.parse(e.nativeEvent.data) as StageEvent;
+        onEvent?.(parsed);
+      } catch {
+        onEvent?.({ type: 'STAGE_ERROR', message: `Malformed bridge payload: ${e.nativeEvent.data}` });
+      }
+    };
+
+    return (
+      <View style={styles.container}>
+        <TypedWebView
+          ref={webViewRef}
+          source={{
+            html,
+            baseUrl: baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`,
+          }}
+          style={styles.webview}
+          originWhitelist={['*']}
+          javaScriptEnabled
+          domStorageEnabled
+          mixedContentMode="always"
+          allowsInlineMediaPlayback
+          mediaPlaybackRequiresUserAction={false}
+          androidLayerType="hardware"
+          scrollEnabled={false}
+          bounces={false}
+          onMessage={handleMessage}
+        />
+      </View>
+    );
+  }
+);
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: 'transparent',
+  },
+  webview: {
+    flex: 1,
+    backgroundColor: 'transparent',
+  },
+});

@@ -490,6 +490,53 @@ class RoomManager {
     }, 6500);
   }
 
+  // Sparring with AI Shadow Rival
+  async startPracticeBattle(socket) {
+    if (!socket.charId) return;
+
+    this.exitRoom(socket, true);
+
+    const { createPracticeBot } = require('./PracticeBot');
+    const bot = await createPracticeBot(2);
+
+    const roomId = uuidv4();
+    const room = {
+      id:               roomId,
+      host:             { socket, character: socket.character, ready: true, skills: [] },
+      enemy:            { socket: bot, character: bot.character, ready: true, skills: [] },
+      password:         '',
+      mode:             'practice',
+      stage:            this._randomStage(),
+      allowScrolls:     false,
+      allowSpectators:  false,
+      spectators:       new Map(),
+      state:            'ready',
+      createdAt:        Date.now(),
+    };
+
+    this._rooms.set(roomId, room);
+    this._playerRoom.set(socket.charId, roomId);
+
+    socket.emit('Room.created', {
+      room_id:          roomId,
+      host:             socket.charId,
+      enemy_id:         bot.charId,
+      mode:             'practice',
+      stage:            room.stage,
+      password:         '',
+      allow_scrolls:    false,
+      allow_spectators: false,
+    });
+
+    socket.emit('Room.countdown.start', { countdown: 3 });
+
+    setTimeout(() => {
+      if (this._rooms.has(roomId)) {
+        this.startBattle(socket, roomId);
+      }
+    }, 3200);
+  }
+
   _randomStage() {
     const stages = [
       'mission_1011', 'mission_1012', 'mission_1021',
