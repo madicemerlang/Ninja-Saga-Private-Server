@@ -77,6 +77,20 @@ export function CharSelectScreen() {
     if (view !== 'create' || !previewBridgeReady) return;
     const url = buildPlayerPreviewSwfUrl(serverUrl, gender, hairNum, hairColor);
     previewRef.current?.loadSwf(url);
+
+    // Preload adjacent hairstyles, opposite gender & all hair colors into Ruffle WebView memory for 0ms switching!
+    const nextHair = hairNum >= MAX_HAIR_NUM ? 1 : hairNum + 1;
+    const prevHair = hairNum <= 1 ? MAX_HAIR_NUM : hairNum - 1;
+    const otherGender: 0 | 1 = gender === 0 ? 1 : 0;
+    const preloadUrls = [
+      buildPlayerPreviewSwfUrl(serverUrl, otherGender, hairNum, hairColor),
+      buildPlayerPreviewSwfUrl(serverUrl, gender, nextHair, hairColor),
+      buildPlayerPreviewSwfUrl(serverUrl, gender, prevHair, hairColor),
+      ...HAIR_COLORS.filter((c) => c.code !== hairColor).map((c) =>
+        buildPlayerPreviewSwfUrl(serverUrl, gender, hairNum, c.code)
+      ),
+    ];
+    previewRef.current?.preloadSwfs(preloadUrls);
   }, [view, previewBridgeReady, serverUrl, gender, hairNum, hairColor]);
 
   const handlePreviewEvent = (ev: StageEvent) => {
@@ -113,7 +127,7 @@ export function CharSelectScreen() {
     try {
       const res = await api.deleteCharacter(uid, sessionKey, deleteTarget.char_id);
       if (res.status !== 1) {
-        setError(res.error || 'Gagal menghapus karakter.');
+        setError(res.error || 'Failed to delete character.');
         return;
       }
       const listRes = await api.getCharacters(uid, sessionKey);
@@ -130,7 +144,7 @@ export function CharSelectScreen() {
   const handleCreate = async () => {
     if (!uid || !sessionKey) return;
     if (charName.trim().length < 2) {
-      setError('Nama karakter minimal 2 huruf.');
+      setError('Character name must be at least 2 characters.');
       return;
     }
     playClickSfx(serverUrl);
@@ -145,7 +159,7 @@ export function CharSelectScreen() {
         hair_color: hairColor,
       });
       if ((res.status as number) !== 1) {
-        setError(String(res.error ?? res.result ?? 'Gagal membuat karakter'));
+        setError(String(res.error ?? res.result ?? 'Failed to create character.'));
         return;
       }
       const listRes = await api.getCharacters(uid, sessionKey);
@@ -214,7 +228,7 @@ export function CharSelectScreen() {
           </View>
 
           {/* Right: Authentic Ninja Saga Customization Panel */}
-          <ScrollView style={styles.customCard} contentContainerStyle={styles.customContent}>
+          <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} style={styles.customCard} contentContainerStyle={styles.customContent}>
             <Text style={styles.label}>Ninja Name</Text>
             <TextInput
               style={styles.input}
@@ -484,7 +498,7 @@ export function CharSelectScreen() {
             </View>
 
             <Pressable style={styles.tierCloseBtn} onPress={() => setShowTierModal(false)}>
-              <Text style={styles.tierCloseBtnTxt}>Tutup</Text>
+              <Text style={styles.tierCloseBtnTxt}>Close</Text>
             </Pressable>
           </Pressable>
         </Pressable>
@@ -497,16 +511,16 @@ export function CharSelectScreen() {
           onPress={() => !deleting && setDeleteTarget(null)}
         >
           <Pressable style={styles.deleteModalCard} onPress={() => {}}>
-            <Text style={styles.deleteModalTitle}>Hapus Karakter?</Text>
+            <Text style={styles.deleteModalTitle}>Delete Character?</Text>
             <Text style={styles.deleteModalDesc}>
-              Yakin ingin menghapus ninja{' '}
+              Are you sure you want to delete{' '}
               <Text style={{ fontWeight: '900', color: '#FDE047' }}>
                 {deleteTarget.character_name}
               </Text>{' '}
-              (Level {deleteTarget.character_level})? Data karakter akan hilang permanen.
+              (Level {deleteTarget.character_level})? Character data will be permanently lost.
             </Text>
             <Text style={styles.deleteModalSafeNote}>
-              💎 Token terikat ke akun & tetap utuh meski karakter dihapus.
+              💎 Tokens are bound to your account and remain safe even if this character is deleted.
             </Text>
             <View style={styles.deleteModalBtns}>
               <Pressable
@@ -514,7 +528,7 @@ export function CharSelectScreen() {
                 disabled={deleting}
                 onPress={() => setDeleteTarget(null)}
               >
-                <Text style={styles.deleteBtnTxt}>Batal</Text>
+                <Text style={styles.deleteBtnTxt}>Cancel</Text>
               </Pressable>
               <Pressable
                 style={styles.deleteConfirmBtn}
@@ -522,7 +536,7 @@ export function CharSelectScreen() {
                 onPress={handleDeleteCharacter}
               >
                 <Text style={styles.deleteBtnTxt}>
-                  {deleting ? 'Menghapus...' : 'Hapus Permanen'}
+                  {deleting ? 'Deleting...' : 'Delete Permanently'}
                 </Text>
               </Pressable>
             </View>

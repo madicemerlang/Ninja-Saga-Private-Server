@@ -92,6 +92,14 @@ class CharacterService
     }
 
     /**
+     * resetElement
+     */
+    public function resetElement($charId, $sessionKey, $elementId)
+    {
+        return $this->equipmentService->resetElement($charId, $sessionKey, $elementId);
+    }
+
+    /**
      * equipSkillSet
      */
     public function equipSkillSet($charId, $sessionKey, $skillString)

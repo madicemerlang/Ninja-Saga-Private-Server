@@ -1,6 +1,9 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { DEFAULT_API_BASE_URL, normalizeBaseUrl } from '../config/env';
 import type { BattleStartResponse, CharacterSummary, LoginResponse } from '../api/client';
+
+export const SAVED_CREDS_STORAGE_KEY = '@ninjasage_saved_creds_v1';
 
 export type ScreenName =
   | 'login'
@@ -14,14 +17,32 @@ export type ScreenName =
   | 'stats'
   | 'pet'
   | 'petShop'
+  | 'petVilla'
   | 'academy'
   | 'hunting'
   | 'forge'
   | 'talent'
+  | 'headquarter'
+  | 'senjutsu'
+  | 'daily'
+  | 'social'
+  | 'recruit'
+  | 'encyclopedia'
   | 'chat'
   | 'pvp'
   | 'pvpBattle'
   | 'poc';
+
+export interface RecruitedMember {
+  id: string;
+  name: string;
+  level: number;
+  hp: number;
+  cp: number;
+  agility: number;
+  kind: 'npc' | 'friend';
+  equippedSkills?: string[];
+}
 
 export interface PvpBattleSession {
   battleId: string;
@@ -55,9 +76,14 @@ export interface ActiveCharacterProfile {
   tokens: number;
   rank: number;
   element1: number;
+  element2: number;
+  element3: number;
   talent1: string;
   talent2: string;
   talent3: string;
+  senjutsuType: string | null;
+  ss: number;
+  senjutsuSkills: string;
   equippedPet: number | null;
   weapon: string;
   clothing: string;
@@ -74,6 +100,7 @@ export interface ActiveCharacterProfile {
   ownedAccessories: string[];
   ownedHairs: string[];
   ownedMaterials: Record<string, number>;
+  ownedItems: Record<string, number>;
   points: CharacterPoints;
   raw: Record<string, unknown>;
 }
@@ -92,9 +119,21 @@ interface AuthState {
   activePvpBattle: PvpBattleSession | null;
   pvpSocketUrl: string | null;
   chatSocketUrl: string | null;
+  graphicsQuality: 'low' | 'medium' | 'high';
+  battleSpeed: 1 | 1.5;
+  recruitedTeam: RecruitedMember[];
+  rememberCredentials: boolean;
+  savedUsername: string;
+  savedPassword: string;
 
   navigate: (screen: ScreenName) => void;
   setServerUrl: (url: string) => void;
+  setGraphicsQuality: (quality: 'low' | 'medium' | 'high') => void;
+  setBattleSpeed: (speed: 1 | 1.5) => void;
+  setSavedCredentials: (remember: boolean, username: string, password: string) => void;
+  recruitMember: (member: RecruitedMember) => boolean;
+  dismissMember: (id: string) => void;
+  clearTeam: () => void;
   setLoginSession: (res: LoginResponse) => void;
   setCharacters: (list: CharacterSummary[]) => void;
   setActiveCharacterId: (id: number) => void;
@@ -171,10 +210,15 @@ function parseProfile(charId: number, raw: Record<string, unknown>): ActiveChara
     tp: Number(cd.character_tp ?? cd.tp ?? 0),
     tokens: Number(acc.account_tokens ?? cd.tokens ?? raw.account_tokens ?? 0),
     rank: Number(cd.character_rank ?? cd.rank ?? 1),
-    element1: Number(cd.character_element_1 ?? cd.element_1 ?? 3),
+    element1: Number(cd.character_element_1 ?? cd.element_1 ?? 0),
+    element2: Number(cd.character_element_2 ?? cd.element_2 ?? 0),
+    element3: Number(cd.character_element_3 ?? cd.element_3 ?? 0),
     talent1: String(cd.character_talent_1 ?? cd.talent_1 ?? ''),
     talent2: String(cd.character_talent_2 ?? cd.talent_2 ?? ''),
     talent3: String(cd.character_talent_3 ?? cd.talent_3 ?? ''),
+    senjutsuType: (raw.senjutsu_type ?? cd.senjutsu_type ?? null) ? String(raw.senjutsu_type ?? cd.senjutsu_type) : null,
+    ss: Number(raw.character_ss ?? cd.character_ss ?? cd.ss ?? 0),
+    senjutsuSkills: String(raw.senjutsu_skills ?? cd.senjutsu_skills ?? ''),
     equippedPet: cd.equipment_pet ? Number(cd.equipment_pet) : null,
     weapon,
     clothing,
@@ -183,7 +227,7 @@ function parseProfile(charId: number, raw: Record<string, unknown>): ActiveChara
     hairStyle,
     hairColor: String(sets.hair_color ?? cd.hair_color ?? '0|0'),
     skinColor: String(sets.skin_color ?? cd.skin_color ?? 'null|null'),
-    equippedSkills: equippedSkills.length > 0 ? equippedSkills : ['skill_01'],
+    equippedSkills,
     ownedSkills: ownedSkills.length > 0 ? ownedSkills : ['skill_01'],
     ownedWeapons: parseInvIds(inv.char_weapons, weapon),
     ownedClothing: parseInvIds(inv.char_sets, clothing),
@@ -191,6 +235,7 @@ function parseProfile(charId: number, raw: Record<string, unknown>): ActiveChara
     ownedAccessories: parseInvIds(inv.char_accessories, accessory),
     ownedHairs: parseInvIds(inv.char_hairs, hairStyle),
     ownedMaterials: parseMaterialCounts(inv.char_materials),
+    ownedItems: parseMaterialCounts(inv.char_items),
     points: {
       wind: Number(pts.atrrib_wind ?? cd.point_wind ?? 0),
       fire: Number(pts.atrrib_fire ?? cd.point_fire ?? 0),
@@ -217,10 +262,54 @@ export const useAuthStore = create<AuthState>((set) => ({
   activePvpBattle: null,
   pvpSocketUrl: null,
   chatSocketUrl: null,
+  graphicsQuality: 'high',
+  battleSpeed: 1.5,
+  recruitedTeam: [],
+  rememberCredentials: false,
+  savedUsername: '',
+  savedPassword: '',
 
   navigate: (screen) => set({ screen }),
 
   setServerUrl: (url) => set({ serverUrl: normalizeBaseUrl(url) }),
+
+  setGraphicsQuality: (graphicsQuality) => set({ graphicsQuality }),
+
+  setBattleSpeed: (battleSpeed) => set({ battleSpeed }),
+
+  setSavedCredentials: (remember, username, password) => {
+    set({
+      rememberCredentials: remember,
+      savedUsername: remember ? username : '',
+      savedPassword: remember ? password : '',
+    });
+    if (remember) {
+      AsyncStorage.setItem(
+        SAVED_CREDS_STORAGE_KEY,
+        JSON.stringify({ remember: true, username, password })
+      ).catch(() => {});
+    } else {
+      AsyncStorage.removeItem(SAVED_CREDS_STORAGE_KEY).catch(() => {});
+    }
+  },
+
+  recruitMember: (member) => {
+    let added = false;
+    set((state) => {
+      if (state.recruitedTeam.some((m) => m.id === member.id)) return state;
+      if (state.recruitedTeam.length >= 2) return state;
+      added = true;
+      return { recruitedTeam: [...state.recruitedTeam, member] };
+    });
+    return added;
+  },
+
+  dismissMember: (id) =>
+    set((state) => ({
+      recruitedTeam: state.recruitedTeam.filter((m) => m.id !== id),
+    })),
+
+  clearTeam: () => set({ recruitedTeam: [] }),
 
   setLoginSession: (res) => {
     const list = Array.isArray(res.characters?.account_data)

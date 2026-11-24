@@ -63,28 +63,36 @@ class PromotionService
         $genderSuffix = $char->gender == 0 ? '_0' : '_1';
         $vestId = 'set_588' . $genderSuffix;
 
-        $itemsToAward = [$vestId];
+        $awardedVestId = $vestId;
+        $itemConfig = Item::where('item_id', $vestId)->first();
+        if (!$itemConfig) {
+            $awardedVestId = 'set_588';
+            $itemConfig = Item::where('item_id', $awardedVestId)->first();
+        }
 
-        foreach ($itemsToAward as $rewardId) {
-            $itemConfig = Item::where('item_id', $rewardId)->first();
-            if (!$itemConfig) {
-                // Try without suffix
-                $rewardId = substr($rewardId, 0, -2);
-                $itemConfig = Item::where('item_id', $rewardId)->first();
-            }
-
-            if ($itemConfig) {
-                CharacterItem::updateOrCreate(
-                    ['character_id' => $charId, 'item_id' => $rewardId],
-                    ['quantity' => \Illuminate\Support\Facades\DB::raw('quantity + 1'), 'category' => 'set']
-                );
+        if ($itemConfig) {
+            $existing = CharacterItem::where('character_id', $charId)->where('item_id', $awardedVestId)->first();
+            if ($existing) {
+                $existing->quantity += 1;
+                $existing->save();
+            } else {
+                CharacterItem::create([
+                    'character_id' => $charId,
+                    'item_id' => $awardedVestId,
+                    'quantity' => 1,
+                    'category' => 'set',
+                ]);
             }
         }
 
-        // Add Skills
-        $skillsToAward = ['skill_345'];
-        if ($classSkillId) $skillsToAward[] = $classSkillId;
+        // Validate classSkillId (authentic Ninja Saga Special Jounin Class Jutsus: skill_4000..skill_4004)
+        $validClasses = ['skill_4000', 'skill_4001', 'skill_4002', 'skill_4003', 'skill_4004'];
+        if (!$classSkillId || !in_array($classSkillId, $validClasses, true)) {
+            $classSkillId = 'skill_4000';
+        }
 
+        // Add Skills
+        $skillsToAward = ['skill_345', $classSkillId];
         foreach ($skillsToAward as $skillId) {
             CharacterSkill::firstOrCreate([
                 'character_id' => $charId,
@@ -104,7 +112,8 @@ class PromotionService
             'error' => 0,
             'rewards' => [
                 'skill_345',
-                'set_588_%s'
+                $classSkillId,
+                $awardedVestId,
             ],
             'result' => 'Promoted'
         ];

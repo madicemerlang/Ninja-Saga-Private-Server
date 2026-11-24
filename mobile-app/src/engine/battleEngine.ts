@@ -209,6 +209,59 @@ function getEffectMeta(id: string, fallbackName?: string): EffectMeta {
   };
 }
 
+/**
+ * Applies an authentic Ninja Saga NPC buff/debuff/heal effect directly onto a Combatant,
+ * normalizing NPC JSON aliases (e.g. 'flexible' -> 'reflexes') so all battleEngine modifiers work!
+ */
+export function applyNpcStatusEffect(
+  unit: Combatant,
+  rawEff: {
+    effect?: string;
+    effect_name?: string;
+    type?: string;
+    duration?: number;
+    amount?: number;
+    calc_type?: string;
+  }
+): { combatant: Combatant; applied?: StatusEffect; healed?: number } {
+  const rawId = String(rawEff.effect ?? '').trim();
+  if (!rawId) return { combatant: unit };
+
+  const normalizedId = rawId === 'flexible' ? 'reflexes' : rawId;
+  const amount = Number(rawEff.amount ?? 0);
+  const calcType: 'percent' | 'number' = rawEff.calc_type === 'number' ? 'number' : 'percent';
+
+  if (normalizedId === 'heal') {
+    const healAmt =
+      calcType === 'number'
+        ? Math.max(10, Math.round(amount || unit.maxHp * 0.2))
+        : Math.max(15, Math.round((unit.maxHp * (amount || 20)) / 100));
+    return {
+      combatant: { ...unit, hp: Math.min(unit.maxHp, unit.hp + healAmt) },
+      healed: healAmt,
+    };
+  }
+
+  const meta = getEffectMeta(normalizedId, rawEff.effect_name);
+  const turns = Math.max(1, Number(rawEff.duration ?? 2));
+  const statusType: 'Buff' | 'Debuff' = rawEff.type === 'Buff' ? 'Buff' : 'Debuff';
+  const nextStatus: StatusEffect = {
+    id: normalizedId,
+    name: meta.name,
+    shortCode: meta.shortCode,
+    icon: meta.icon,
+    type: statusType,
+    turns,
+    amount,
+    calcType,
+  };
+  const filtered = (unit.statuses ?? []).filter((s) => s.id !== normalizedId);
+  return {
+    combatant: { ...unit, statuses: [...filtered, nextStatus] },
+    applied: nextStatus,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Status Query & Modifier Helpers
 // ─────────────────────────────────────────────────────────────────────────────

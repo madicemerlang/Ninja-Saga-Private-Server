@@ -64,6 +64,13 @@ class MobileAuthController extends Controller
             'password' => ['required', 'string', 'min:4'],
         ]);
 
+        if (\App\Models\User::where('username', $validated['username'])->exists()) {
+            return response()->json([
+                'status' => 0,
+                'error' => 'Username Exist',
+            ], 422);
+        }
+
         $result = $loginService->registerUser(
             $validated['username'],
             $validated['email'],
@@ -72,6 +79,9 @@ class MobileAuthController extends Controller
         );
 
         $ok = is_array($result) && (($result['status'] ?? 0) === 1);
+        if (!$ok && is_array($result) && empty($result['error'])) {
+            $result['error'] = (string) ($result['result'] ?? 'Registration failed');
+        }
 
         return response()->json($result, $ok ? 201 : 422);
     }

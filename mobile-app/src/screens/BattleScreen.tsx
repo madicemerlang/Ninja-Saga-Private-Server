@@ -30,9 +30,15 @@ import {
 import { FloatingPopup } from '../components/FloatingPopup';
 import { LoadingScreenOverlay } from '../components/LoadingScreenOverlay';
 import { TimelineToken } from '../components/TimelineToken';
-import { buildAudioUrl, buildBattleSwfUrl, buildSkillIconsSwfUrl } from '../config/env';
+import {
+  buildAudioUrl,
+  buildBattleSwfUrl,
+  buildIconSheetSwfUrl,
+  buildSkillIconsSwfUrl,
+} from '../config/env';
 import {
   advanceAgilityTimeline,
+  applyNpcStatusEffect,
   attemptFlee,
   buildEnemyCombatant,
   buildPetCombatant,
@@ -67,11 +73,72 @@ import {
 } from '../stage/RuffleStageView';
 import { useAuthStore } from '../store/useAuthStore';
 
-const INITIAL_CONSUMABLES: BattleConsumable[] = [
-  { id: 'hp_scroll', name: 'HP Scroll', icon: '🧪', desc: 'Restore 35% Max HP', qty: 2 },
-  { id: 'cp_scroll', name: 'CP Scroll', icon: '💧', desc: 'Restore 35% Max CP', qty: 2 },
-  { id: 'purify_pill', name: 'Antidote', icon: '✨', desc: 'Clear all debuffs', qty: 2 },
-];
+interface BattleConsumableTile {
+  id: string;
+  name: string;
+  icon: string;
+  desc: string;
+  qty: number;
+  swfId: string;
+  level: number;
+  borderColor: string;
+  bgColor: string;
+  effectKind: 'hp' | 'cp' | 'purify';
+  restoreAmount: number;
+}
+
+function buildOwnedBattleConsumables(
+  ownedItems: Record<string, number> | undefined,
+  itemsById: Record<string, { name?: string; level?: number; description?: string }>
+): BattleConsumableTile[] {
+  if (!ownedItems) return [];
+  const list: BattleConsumableTile[] = [];
+  for (const [rawId, qty] of Object.entries(ownedItems)) {
+    if (!qty || qty <= 0) continue;
+    // Skip Smoke Bomb (item_01) since Flee is direct 100% Forfeit
+    if (rawId === 'item_01') continue;
+    const def = itemsById[rawId];
+    const name = def?.name || rawId;
+    const desc = def?.description || '';
+    const lower = `${name} ${desc}`.toLowerCase();
+    const lv = Math.max(1, Number(def?.level ?? 1));
+
+    const numMatch = desc.match(/(\d+)\s*(hp|cp)/i);
+    const parsedAmt = numMatch ? Number(numMatch[1]) : 0;
+
+    let effectKind: 'hp' | 'cp' | 'purify' = 'hp';
+    let borderColor = '#EF4444';
+    let bgColor = '#450A0A';
+    let icon = '🧪';
+
+    if (lower.includes('chakra') || lower.includes(' cp')) {
+      effectKind = 'cp';
+      borderColor = '#38BDF8';
+      bgColor = '#082F49';
+      icon = '💧';
+    } else if (lower.includes('purif') || lower.includes('antidote') || lower.includes('debuff') || lower.includes('cleanse')) {
+      effectKind = 'purify';
+      borderColor = '#34D399';
+      bgColor = '#064E3B';
+      icon = '✨';
+    }
+
+    list.push({
+      id: rawId,
+      name,
+      icon,
+      desc: desc || 'Consumable scroll',
+      qty,
+      swfId: rawId,
+      level: lv,
+      borderColor,
+      bgColor,
+      effectKind,
+      restoreAmount: parsedAmt,
+    });
+  }
+  return list.sort((a, b) => a.level - b.level || a.id.localeCompare(b.id));
+}
 
 const SWF_ARENA_W = 860;
 const SWF_ARENA_H = 440;
@@ -84,15 +151,20 @@ const UNIT_PLATE_H = 44;
 const SWF_ENEMY_FORMATIONS: Record<number, Array<[number, number]>> = {
   1: [[630, 255]],
   2: [
-    [630, 200],
-    [630, 298],
+    [630, 255],
+    [630, 168],
   ],
   3: [
+    [630, 255],
     [630, 168],
-    [630, 244],
-    [630, 320],
+    [630, 328],
   ],
 };
+
+const SWF_ALLY_POS: Array<[number, number]> = [
+  [220, 168],
+  [220, 328],
+];
 
 /**
  * Exact mathematical inverse of Ruffle's `scale: 'noBorder'` transform.
@@ -120,11 +192,15 @@ export function BattleScreen() {
   const shakeAnim = useRef(new Animated.Value(0)).current;
   const winDims = useWindowDimensions();
   const [stageSize, setStageSize] = useState({ width: winDims.width, height: winDims.height });
+  const [atbTrackWidth, setAtbTrackWidth] = useState(360);
 
   const serverUrl = useAuthStore((s) => s.serverUrl);
   const sessionKey = useAuthStore((s) => s.sessionKey);
   const profile = useAuthStore((s) => s.profile);
   const activeBattle = useAuthStore((s) => s.activeBattle);
+  // Snapshot recruitedTeam ONCE on battle mount so clearing the team on victory/defeat NEVER reloads the SWF or restarts battle!
+  const [battleTeam] = useState(() => useAuthStore.getState().recruitedTeam);
+  const clearTeam = useAuthStore((s) => s.clearTeam);
   const patchProfileStats = useAuthStore((s) => s.patchProfileStats);
   const setActiveBattle = useAuthStore((s) => s.setActiveBattle);
   const navigate = useAuthStore((s) => s.navigate);
@@ -154,27 +230,52 @@ export function BattleScreen() {
     return raw.map((e, idx) => buildEnemyCombatant(e, idx));
   }, [activeBattle]);
 
+  const initialAllies: Combatant[] = useMemo(
+    () =>
+      battleTeam.slice(0, 2).map((m) => {
+        const lv = Math.max(1, m.level || 1);
+        const maxHp = Math.max(100, m.hp || 100 + lv * 40);
+        const maxCp = Math.max(80, m.cp || 100 + lv * 40);
+        return {
+          id: m.id,
+          name: m.name,
+          level: lv,
+          hp: maxHp,
+          maxHp,
+          cp: maxCp,
+          maxCp,
+          agility: Math.max(8, m.agility || 10 + lv),
+          baseDamage: Math.max(16, 14 + lv * 6),
+          critChance: 0.12,
+          dodgeChance: 0.08,
+          statuses: [],
+        };
+      }),
+    [battleTeam]
+  );
+
   const [player, setPlayer] = useState<Combatant>(() =>
     buildPlayerCombatant(profile?.name ?? 'Ninja', profile?.level ?? 1, profile?.points, 0)
   );
   const [pet, setPet] = useState<Combatant | null>(null);
   const petDefRef = useRef<PetJsonDef | undefined>(undefined);
+  const [allies, setAllies] = useState<Combatant[]>(initialAllies);
   const [enemies, setEnemies] = useState<Combatant[]>(initialEnemies);
   const [targetIdx, setTargetIdx] = useState(0);
   const [timelineGauges, setTimelineGauges] = useState<Record<string, number>>({});
   const [activeActorId, setActiveActorId] = useState<string | null>('player');
   const [turnCount, setTurnCount] = useState(0);
 
-  // Ninja Horizon Battle Controls
-  const [speed, setSpeed] = useState<1 | 2>(1);
+  // Ninja Horizon Battle Controls (always locked at 1.5x speed)
+  const speed: 1.5 = 1.5;
   const [autoBattle, setAutoBattle] = useState(false);
   const [showItems, setShowItems] = useState(false);
-  const [consumables, setConsumables] = useState<BattleConsumable[]>(INITIAL_CONSUMABLES);
+  const [consumables, setConsumables] = useState<BattleConsumableTile[]>([]);
   const [inspectedSkill, setInspectedSkill] = useState<SkillDef | null>(null);
-  const [inspectedUnit, setInspectedUnit] = useState<{ side: 'player' | 'enemy'; idx: number } | null>(null);
+  const [inspectedUnit, setInspectedUnit] = useState<{ side: 'player' | 'ally' | 'enemy'; idx: number } | null>(null);
   const [showFleeModal, setShowFleeModal] = useState(false);
 
-  const speedRef = useRef<1 | 2>(1);
+  const speedRef = useRef<1 | 1.5>(1.5);
   speedRef.current = speed;
   const autoRef = useRef(false);
   autoRef.current = autoBattle;
@@ -183,9 +284,12 @@ export function BattleScreen() {
   playerRef.current = player;
   const petRef = useRef<Combatant | null>(pet);
   petRef.current = pet;
+  const alliesRef = useRef<Combatant[]>(allies);
+  alliesRef.current = allies;
   const enemiesRef = useRef(enemies);
   enemiesRef.current = enemies;
   const cooldownsRef = useRef<Record<string, number>>({});
+  const usedItemsRef = useRef<Record<string, number>>({});
   const statsInitializedRef = useRef(false);
   const mountedRef = useRef(true);
 
@@ -194,9 +298,38 @@ export function BattleScreen() {
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
   cooldownsRef.current = cooldowns;
   const skillEffectsByIdRef = useRef<Record<string, RawSkillEffectDef[]>>({});
+  const allSkillsByIdRef = useRef<Record<string, SkillDef>>({});
   const enemiesByIdRef = useRef<Record<string, EnemyDef>>({});
+  const npcsByIdRef = useRef<
+    Record<
+      string,
+      {
+        id: string;
+        name: string;
+        attacks?: Array<{
+          cooldown?: number;
+          animation?: string;
+          posType?: string;
+          dmg?: number;
+          multi_hit?: boolean;
+          effects?: Array<{
+            type?: string;
+            target?: string;
+            effect?: string;
+            effect_name?: string;
+            duration?: number;
+            amount?: number;
+            calc_type?: string;
+          }>;
+        }>;
+      }
+    >
+  >({});
+  const allyCooldownsRef = useRef<Record<number, Record<string, number>>>({});
   const [stageReady, setStageReady] = useState(false);
   const [turn, setTurn] = useState<'player' | 'animating' | 'done'>('animating');
+  const turnRef = useRef<'player' | 'animating' | 'done'>('animating');
+  turnRef.current = turn;
   const [combatLog, setCombatLog] = useState<string>('Loading Ninja Horizon 36 FPS Battle Stage...');
   const [floats, setFloats] = useState<FloatingNumber[]>([]);
   const [finishResult, setFinishResult] = useState<BattleFinishResponse | null>(null);
@@ -210,10 +343,12 @@ export function BattleScreen() {
 
   useEffect(() => {
     mountedRef.current = true;
+    const stage = stageRef.current;
     return () => {
       mountedRef.current = false;
       if (hitWatchdogRef.current) clearTimeout(hitWatchdogRef.current);
       if (doneWatchdogRef.current) clearTimeout(doneWatchdogRef.current);
+      stage?.clearStage();
     };
   }, []);
 
@@ -259,25 +394,17 @@ export function BattleScreen() {
 
       const sp = speedRef.current;
       if (onHit) {
-        hitWatchdogRef.current = setTimeout(fireHit, Math.round(2400 / sp));
+        hitWatchdogRef.current = setTimeout(fireHit, Math.round(3200 / sp));
       }
       if (onDone) {
-        doneWatchdogRef.current = setTimeout(fireDone, Math.round(4300 / sp));
+        doneWatchdogRef.current = setTimeout(fireDone, Math.round(6500 / sp));
       }
     },
     [clearWatchdogs]
   );
 
-  const triggerCritShake = useCallback(() => {
-    shakeAnim.setValue(0);
-    Animated.sequence([
-      Animated.timing(shakeAnim, { toValue: -7, duration: 38, useNativeDriver: true }),
-      Animated.timing(shakeAnim, { toValue: 7, duration: 38, useNativeDriver: true }),
-      Animated.timing(shakeAnim, { toValue: -5, duration: 35, useNativeDriver: true }),
-      Animated.timing(shakeAnim, { toValue: 5, duration: 35, useNativeDriver: true }),
-      Animated.timing(shakeAnim, { toValue: 0, duration: 35, useNativeDriver: true }),
-    ]).start();
-  }, [shakeAnim]);
+  // Disabled WebView screen-shake on Crit to prevent Android SurfaceFlinger WebGL texture re-upload stutter!
+  const triggerCritShake = useCallback(() => {}, []);
 
   const pushFloats = useCallback((items: FloatingNumber[]) => {
     if (items.length === 0) return;
@@ -290,17 +417,21 @@ export function BattleScreen() {
 
   useEffect(() => {
     setEnemies(initialEnemies);
+    setAllies(initialAllies);
     const firstAlive = initialEnemies.findIndex((e) => e.hp > 0);
     setTargetIdx(firstAlive !== -1 ? firstAlive : 0);
 
     const initGauges: Record<string, number> = { player: 0 };
     if (petRef.current) initGauges['pet'] = 0;
+    initialAllies.forEach((_, idx) => {
+      initGauges[`ally_${idx}`] = 0;
+    });
     initialEnemies.forEach((_, idx) => {
       initGauges[`ene_${idx}`] = 0;
     });
     setTimelineGauges(initGauges);
     gaugesRef.current = initGauges;
-  }, [initialEnemies]);
+  }, [initialEnemies, initialAllies]);
 
   const charId = profile?.charId ?? 1;
   const equipTag = profile
@@ -311,27 +442,45 @@ export function BattleScreen() {
     () => initialEnemies.map((e) => e.id).join(','),
     [initialEnemies]
   );
+  const alliesCsv = useMemo(
+    () => initialAllies.map((a) => a.id).join(','),
+    [initialAllies]
+  );
   const missionBg = activeBattle?.mission.bg ?? 'mission_01';
 
-  // Load skills, weapon damage, and equipped pet metadata ONCE per battle
+  // Load skills, weapon damage, equipped pet metadata, and authentic NPC jutsu definitions ONCE per battle
   useEffect(() => {
     Promise.all([
       loadGameData(serverUrl),
       loadLibraryData(serverUrl),
       loadPetsJson(serverUrl).catch(() => ({} as Record<string, PetJsonDef>)),
+      fetch(`${serverUrl.replace(/\/+$/, '')}/game_data/npc.json`)
+        .then((r) => (r.ok ? r.json() : []))
+        .catch(() => []),
     ])
-      .then(([bundle, lib, petsById]) => {
+      .then(([bundle, lib, petsById, rawNpcs]) => {
         if (!mountedRef.current) return;
+        const npcMap: typeof npcsByIdRef.current = {};
+        if (Array.isArray(rawNpcs)) {
+          for (const n of rawNpcs) {
+            if (n?.id && !npcMap[n.id]) {
+              npcMap[n.id] = n;
+            }
+          }
+        }
+        npcsByIdRef.current = npcMap;
         const ids = equippedSkillsKey.split(',').filter(Boolean);
         const resolved = ids
           .map((id) => bundle.skillsById[id])
           .filter((s): s is SkillDef => Boolean(s));
         setSkills(resolved);
+        allSkillsByIdRef.current = bundle.skillsById ?? {};
         skillEffectsByIdRef.current = bundle.skillEffectsById ?? {};
         enemiesByIdRef.current = bundle.enemiesById ?? {};
 
         if (!statsInitializedRef.current && profile) {
           statsInitializedRef.current = true;
+          setConsumables(buildOwnedBattleConsumables(profile.ownedItems, lib.itemsById ?? {}));
           const wpnDmg = profile.weapon ? (lib.itemsById[profile.weapon]?.damage ?? 0) : 0;
           const boosted = buildPlayerCombatant(profile.name, profile.level, profile.points, wpnDmg);
           setPlayer(boosted);
@@ -377,20 +526,13 @@ export function BattleScreen() {
         enemiesCsv,
         equippedSkillsKey,
         equipTag,
-        missionBg
+        missionBg,
+        alliesCsv
       );
       stageRef.current?.loadSwf(battleSwfUrl);
     }, 300);
     return () => clearTimeout(timer);
-  }, [serverUrl, charId, enemiesCsv, equippedSkillsKey, equipTag, missionBg]);
-
-  const toggleSpeed = () => {
-    playClickSfx(serverUrl);
-    const next: 1 | 2 = speed === 1 ? 2 : 1;
-    setSpeed(next);
-    speedRef.current = next;
-    stageRef.current?.setSpeed(next);
-  };
+  }, [serverUrl, charId, enemiesCsv, equippedSkillsKey, equipTag, missionBg, alliesCsv]);
 
   const toggleAuto = () => {
     playClickSfx(serverUrl);
@@ -400,22 +542,62 @@ export function BattleScreen() {
   const concludeBattle = useCallback(
     async (victory: boolean) => {
       clearWatchdogs();
+      clearTeam();
       setTurn('done');
       setAutoBattle(false);
       if (!profile || !sessionKey || !activeBattle) return;
       setFinishing(true);
       try {
+        const usedSnapshot = { ...usedItemsRef.current };
+        const hasUsedItems = Object.keys(usedSnapshot).length > 0;
+        const examCtx = activeBattle.examContext;
+
+        if (examCtx) {
+          if (victory) {
+            await api.rpc(
+              examCtx.service,
+              'finishStage',
+              [sessionKey, profile.charId, examCtx.stageId],
+              { sessionKey, charId: profile.charId }
+            );
+          }
+          if (hasUsedItems) {
+            api
+              .battleFinish(profile.charId, sessionKey, activeBattle.mission.id, activeBattle.token, false, usedSnapshot)
+              .catch(() => {});
+          }
+          if (!mountedRef.current) return;
+          usedItemsRef.current = {};
+          setFinishResult({
+            status: 1,
+            victory,
+            xp_reward: 0,
+            gold_reward: 0,
+            level: profile.level,
+            xp: profile.xp,
+            gold: profile.gold,
+            level_up: false,
+          });
+          api
+            .getCharacter(profile.charId, sessionKey)
+            .then((raw) => useAuthStore.getState().setProfileFromRaw(profile.charId, raw))
+            .catch(() => {});
+          return;
+        }
+
         const res = await api.battleFinish(
           profile.charId,
           sessionKey,
           activeBattle.mission.id,
           activeBattle.token,
-          victory
+          victory,
+          hasUsedItems ? usedSnapshot : undefined
         );
         if (!mountedRef.current) return;
+        usedItemsRef.current = {};
         setFinishResult(res);
         patchProfileStats({ level: res.level, xp: res.xp, gold: res.gold });
-        if (res.level_up) {
+        if (res.level_up || hasUsedItems || (res.dropped_items && res.dropped_items.length > 0)) {
           api
             .getCharacter(profile.charId, sessionKey)
             .then((raw) => useAuthStore.getState().setProfileFromRaw(profile.charId, raw))
@@ -463,6 +645,13 @@ export function BattleScreen() {
               },
             ]
           : []),
+        ...alliesRef.current.map((al, idx) => ({
+          id: `ally_${idx}`,
+          name: al.name,
+          agility: getEffectiveAgility(al),
+          isPlayer: true,
+          isAlive: al.hp > 0,
+        })),
         ...curEnemies.map((e, idx) => ({
           id: `ene_${idx}`,
           name: e.name,
@@ -478,7 +667,7 @@ export function BattleScreen() {
       setActiveActorId(actorId);
       setTurnCount((c) => c + 1);
 
-      const delayScale = speedRef.current === 2 ? 0.52 : 1.0;
+      const delayScale = speedRef.current > 1 ? 0.68 : 1.0;
 
       // ── PLAYER TURN ──
       if (actorId === 'player') {
@@ -561,6 +750,379 @@ export function BattleScreen() {
             }
           }, Math.round(520 * delayScale));
         }, Math.round(480 * delayScale));
+        return;
+      }
+
+      // ── RECRUITED ALLY TURN (Authentic Multi-Jutsu NPC Combat!) ──
+      if (actorId.startsWith('ally_')) {
+        const allyIdx = parseInt(actorId.replace('ally_', ''), 10);
+        const ally = alliesRef.current[allyIdx];
+        if (!ally || ally.hp <= 0) {
+          gaugesRef.current[actorId] = 0;
+          stepTimeline(curPlayer, curEnemies, curCd);
+          return;
+        }
+        const aliveIndices = curEnemies
+          .map((e, i) => (e.hp > 0 ? i : -1))
+          .filter((i) => i !== -1);
+        if (aliveIndices.length === 0) {
+          armSequenceCallbacks(null, () => concludeBattle(true));
+          stageRef.current?.playSequence('player_win');
+          return;
+        }
+        const chosenTargetIdx =
+          aliveIndices[Math.floor(Math.random() * aliveIndices.length)];
+
+        setTurn('animating');
+        setCombatLog(`🤝 ${ally.name}'s turn!`);
+
+        setTimeout(() => {
+          if (!mountedRef.current) return;
+          gaugesRef.current[actorId] = 0;
+          setTimelineGauges({ ...gaugesRef.current });
+          setActiveActorId(null);
+
+          const latestEnemies = enemiesRef.current;
+          const latestAlive = latestEnemies
+            .map((e, i) => (e.hp > 0 ? i : -1))
+            .filter((i) => i !== -1);
+          if (latestAlive.length === 0) return;
+          const tIdx =
+            latestEnemies[chosenTargetIdx]?.hp > 0
+              ? chosenTargetIdx
+              : latestAlive[Math.floor(Math.random() * latestAlive.length)];
+
+          // Tick down this ally's jutsu cooldowns
+          const prevCds = allyCooldownsRef.current[allyIdx] ?? {};
+          const nextCds: Record<string, number> = {};
+          for (const [k, v] of Object.entries(prevCds)) {
+            if (v > 1) nextCds[k] = v - 1;
+          }
+
+          // ── RECRUITED FRIEND EQUIPPED JUTSU AI ──
+          if (ally.id.startsWith('friend_')) {
+            const memberSpec = battleTeam[allyIdx];
+            const friendSkillIds = (memberSpec?.equippedSkills ?? ['skill_01']).slice(0, 6);
+            const resolvedFriendSkills = friendSkillIds
+              .map((sid) => allSkillsByIdRef.current[sid])
+              .filter((s): s is SkillDef => Boolean(s));
+            const readyFriendSkills = resolvedFriendSkills.filter(
+              (s) => (nextCds[s.id] ?? 0) <= 0 && ally.cp >= (s.cp_cost || 0)
+            );
+            const chosenSkill =
+              readyFriendSkills.length > 0 && Math.random() < 0.78
+                ? readyFriendSkills[Math.floor(Math.random() * readyFriendSkills.length)]
+                : null;
+
+            const target = latestEnemies[tIdx];
+            const didCrit = Math.random() < (ally.critChance ?? 0.12);
+            const variance = 0.9 + Math.random() * 0.22;
+
+            if (chosenSkill) {
+              if (chosenSkill.cooldown > 0) nextCds[chosenSkill.id] = chosenSkill.cooldown;
+              allyCooldownsRef.current[allyIdx] = nextCds;
+              const nextAllyCp = Math.max(0, ally.cp - (chosenSkill.cp_cost || 0));
+              const nextAlliesState = alliesRef.current.map((a, i) =>
+                i === allyIdx ? { ...a, cp: nextAllyCp } : a
+              );
+              const skAoE = isSkillAoE(chosenSkill);
+              const isSelfBuff = String(chosenSkill.target ?? '').toLowerCase() === 'self' || chosenSkill.damage === 0;
+              const rawDmg = isSelfBuff
+                ? 0
+                : Math.max(12, Math.round((chosenSkill.damage + ally.level * 4) * variance * (didCrit ? 1.5 : 1)));
+              const hitFloats: FloatingNumber[] = [];
+              let nextEnemies = latestEnemies;
+              let isKill = false;
+              let hitLog = '';
+
+              if (isSelfBuff) {
+                const effs = skillEffectsByIdRef.current[chosenSkill.id] ?? [];
+                let updatedAlly = nextAlliesState[allyIdx];
+                for (const ef of effs) {
+                  const res = applyNpcStatusEffect(updatedAlly, { ...ef, type: ef.type || 'Buff' });
+                  updatedAlly = res.combatant;
+                }
+                const finalAllies = nextAlliesState.map((a, i) => (i === allyIdx ? updatedAlly : a));
+                hitFloats.push({
+                  id: Date.now() + Math.floor(Math.random() * 10000),
+                  target: 'player',
+                  text: `✨ ${chosenSkill.name}`,
+                  kind: 'buff',
+                });
+                hitLog = `🤝 ${ally.name} cast ${chosenSkill.name}!`;
+                armSequenceCallbacks(
+                  () => {
+                    setAllies(finalAllies);
+                    setCombatLog(hitLog);
+                    pushFloats(hitFloats);
+                  },
+                  () => {
+                    stepTimeline(playerRef.current, enemiesRef.current, curCd);
+                  }
+                );
+                stageRef.current?.playSequence(`a${allyIdx}_skill_${chosenSkill.id}_t${tIdx}`);
+                return;
+              }
+
+              if (skAoE) {
+                nextEnemies = latestEnemies.map((e, i) => {
+                  if (e.hp <= 0) return e;
+                  const nHp = Math.max(0, e.hp - rawDmg);
+                  hitFloats.push({
+                    id: Date.now() + i * 31 + Math.floor(Math.random() * 1000),
+                    target: 'enemy',
+                    targetSlot: i,
+                    text: didCrit ? `CRIT -${rawDmg}!` : `-${rawDmg}`,
+                    kind: didCrit ? 'crit' : 'damage',
+                  });
+                  return { ...e, hp: nHp };
+                });
+                isKill = nextEnemies[tIdx].hp <= 0;
+                hitLog = `🤝 ${ally.name} cast AoE ${chosenSkill.name} for ${rawDmg} DMG!`;
+              } else {
+                const nextHp = Math.max(0, target.hp - rawDmg);
+                isKill = nextHp <= 0;
+                nextEnemies = latestEnemies.map((e, i) => (i === tIdx ? { ...e, hp: nextHp } : e));
+                hitFloats.push({
+                  id: Date.now() + Math.floor(Math.random() * 10000),
+                  target: 'enemy',
+                  targetSlot: tIdx,
+                  text: didCrit ? `CRIT -${rawDmg}!` : `-${rawDmg}`,
+                  kind: didCrit ? 'crit' : 'damage',
+                });
+                hitLog = `🤝 ${ally.name} cast ${chosenSkill.name} on ${target.name} for ${rawDmg} DMG!`;
+              }
+
+              armSequenceCallbacks(
+                () => {
+                  setAllies(nextAlliesState);
+                  setEnemies(nextEnemies);
+                  setCombatLog(hitLog);
+                  pushFloats(hitFloats);
+                },
+                () => {
+                  const allDeadAfterAlly = nextEnemies.every((e) => e.hp <= 0);
+                  if (allDeadAfterAlly) {
+                    armSequenceCallbacks(null, () => concludeBattle(true));
+                    stageRef.current?.playSequence('player_win');
+                  } else {
+                    stepTimeline(playerRef.current, nextEnemies, curCd);
+                  }
+                }
+              );
+              stageRef.current?.playSequence(
+                `a${allyIdx}_skill_${chosenSkill.id}_t${tIdx}${isKill ? '_kill' : ''}`
+              );
+              return;
+            }
+          }
+
+          // Pick an authentic jutsu from npc.json (prefer off-cooldown special jutsus!)
+          const npcDef = npcsByIdRef.current[ally.id];
+          const atkPool = npcDef?.attacks ?? [];
+          const readyAtks = atkPool.filter((a) => {
+            const anim = a.animation || 'attack_01';
+            return (nextCds[anim] ?? 0) <= 0;
+          });
+          const specialReady = readyAtks.filter((a) => (a.animation || 'attack_01') !== 'attack_01');
+          const chosenAtk =
+            specialReady.length > 0 && Math.random() < 0.78
+              ? specialReady[Math.floor(Math.random() * specialReady.length)]
+              : readyAtks[0] ?? atkPool[0];
+
+          const atkAnim = chosenAtk?.animation || 'attack_01';
+          if (chosenAtk?.cooldown && chosenAtk.cooldown > 0) {
+            nextCds[atkAnim] = chosenAtk.cooldown;
+          }
+          allyCooldownsRef.current[allyIdx] = nextCds;
+
+          const jutsuNum = atkAnim.replace('attack_0', '').replace('attack_', '');
+          const isSupportJutsu = (chosenAtk?.dmg ?? 1) === 0;
+          const isAoE = Boolean(chosenAtk?.multi_hit);
+          const target = latestEnemies[tIdx];
+          const didCrit = !isSupportJutsu && Math.random() < (ally.critChance ?? 0.12);
+          const variance = 0.9 + Math.random() * 0.22;
+
+          let computedDmg = 0;
+          if (!isSupportJutsu) {
+            const rawStat = chosenAtk?.dmg ?? ally.baseDamage;
+            const scaledBase = rawStat > 0 && rawStat <= 5 ? ally.baseDamage * rawStat : rawStat;
+            computedDmg = Math.max(10, Math.round(scaledBase * variance * (didCrit ? 1.5 : 1)));
+          }
+
+          let nextEnemies = latestEnemies;
+          let isKill = false;
+          const hitFloats: FloatingNumber[] = [];
+          let hitLog = '';
+
+          if (isSupportJutsu) {
+            const effList = chosenAtk?.effects ?? [];
+            let nextPlayer = playerRef.current;
+            let nextAllies = alliesRef.current;
+            let appliedLabels: string[] = [];
+
+            if (effList.length === 0) {
+              const healAmt = Math.max(25, Math.round(nextPlayer.maxHp * 0.15));
+              nextPlayer = { ...nextPlayer, hp: Math.min(nextPlayer.maxHp, nextPlayer.hp + healAmt) };
+              appliedLabels.push(`+${healAmt} HP`);
+              hitFloats.push({
+                id: Date.now() + Math.floor(Math.random() * 10000),
+                target: 'player',
+                text: `+${healAmt} HP`,
+                kind: 'heal',
+              });
+            } else {
+              for (const rawEff of effList) {
+                const effTarget = String(rawEff.target || 'master').toLowerCase();
+                if (effTarget === 'self') {
+                  const res = applyNpcStatusEffect(ally, { ...rawEff, type: rawEff.type || 'Buff' });
+                  nextAllies = nextAllies.map((a, i) => (i === allyIdx ? res.combatant : a));
+                  if (res.healed) {
+                    appliedLabels.push(`+${res.healed} HP`);
+                    hitFloats.push({
+                      id: Date.now() + Math.floor(Math.random() * 10000),
+                      target: 'player',
+                      text: `${ally.name} +${res.healed} HP`,
+                      kind: 'heal',
+                    });
+                  } else if (res.applied) {
+                    const amtTxt = res.applied.amount > 0 ? ` +${res.applied.amount}${res.applied.calcType === 'number' ? '' : '%'}` : '';
+                    appliedLabels.push(`${res.applied.icon} ${res.applied.name}${amtTxt} (${res.applied.turns}t)`);
+                    hitFloats.push({
+                      id: Date.now() + Math.floor(Math.random() * 10000),
+                      target: 'player',
+                      text: `${res.applied.icon} ${res.applied.shortCode}${amtTxt}`,
+                      kind: 'buff',
+                    });
+                  }
+                } else if (effTarget === 'enemy') {
+                  const res = applyNpcStatusEffect(target, { ...rawEff, type: 'Debuff' });
+                  nextEnemies = nextEnemies.map((e, i) => (i === tIdx ? res.combatant : e));
+                  if (res.applied) {
+                    appliedLabels.push(`${res.applied.icon} ${res.applied.name}`);
+                    hitFloats.push({
+                      id: Date.now() + Math.floor(Math.random() * 10000),
+                      target: 'enemy',
+                      targetSlot: tIdx,
+                      text: `${res.applied.icon} ${res.applied.name}`,
+                      kind: 'debuff',
+                    });
+                  }
+                } else {
+                  // Default: 'master' -> buff/heal the Player!
+                  const res = applyNpcStatusEffect(nextPlayer, { ...rawEff, type: rawEff.type || 'Buff' });
+                  nextPlayer = res.combatant;
+                  if (res.healed) {
+                    appliedLabels.push(`+${res.healed} HP`);
+                    hitFloats.push({
+                      id: Date.now() + Math.floor(Math.random() * 10000),
+                      target: 'player',
+                      text: `+${res.healed} HP`,
+                      kind: 'heal',
+                    });
+                  } else if (res.applied) {
+                    const amtTxt = res.applied.amount > 0 ? ` +${res.applied.amount}${res.applied.calcType === 'number' ? '' : '%'}` : '';
+                    appliedLabels.push(`${res.applied.icon} ${res.applied.name}${amtTxt} (${res.applied.turns}t)`);
+                    hitFloats.push({
+                      id: Date.now() + Math.floor(Math.random() * 10000),
+                      target: 'player',
+                      text: `${res.applied.icon} ${res.applied.name}${amtTxt}`,
+                      kind: 'buff',
+                    });
+                  }
+                }
+              }
+            }
+
+            hitLog = `🤝 ${ally.name} cast Jutsu #${jutsuNum}: ${appliedLabels.join(', ') || 'Support Buff'}!`;
+            armSequenceCallbacks(
+              () => {
+                setPlayer(nextPlayer);
+                setAllies(nextAllies);
+                setEnemies(nextEnemies);
+                setCombatLog(hitLog);
+                pushFloats(hitFloats);
+              },
+              () => {
+                stepTimeline(nextPlayer, enemiesRef.current, curCd);
+              }
+            );
+            stageRef.current?.playSequence(`a${allyIdx}_${atkAnim}_t${tIdx}`);
+            return;
+          }
+
+          // Offensive Jutsu (single-target or AoE) + apply any authentic NPC enemy debuffs (Stun, Burn, Bleeding, etc.)!
+          const enemyDebuffs = (chosenAtk?.effects ?? []).filter(
+            (ef) => String(ef.target || '').toLowerCase() === 'enemy'
+          );
+
+          if (isAoE) {
+            nextEnemies = latestEnemies.map((e, i) => {
+              if (e.hp <= 0) return e;
+              const nHp = Math.max(0, e.hp - computedDmg);
+              let updated: Combatant = { ...e, hp: nHp };
+              if (nHp > 0) {
+                for (const defEff of enemyDebuffs) {
+                  updated = applyNpcStatusEffect(updated, { ...defEff, type: 'Debuff' }).combatant;
+                }
+              }
+              hitFloats.push({
+                id: Date.now() + i * 31 + Math.floor(Math.random() * 1000),
+                target: 'enemy',
+                targetSlot: i,
+                text: didCrit ? `CRIT -${computedDmg}!` : `-${computedDmg}`,
+                kind: didCrit ? 'crit' : 'damage',
+              });
+              return updated;
+            });
+            isKill = nextEnemies[tIdx].hp <= 0;
+            hitLog = `🤝 ${ally.name} cast AoE Jutsu #${jutsuNum} for ${computedDmg} DMG${didCrit ? ' (CRIT!)' : ''}!`;
+          } else {
+            const nextHp = Math.max(0, target.hp - computedDmg);
+            isKill = nextHp <= 0;
+            let updatedTarget: Combatant = { ...target, hp: nextHp };
+            const debuffNames: string[] = [];
+            if (nextHp > 0) {
+              for (const defEff of enemyDebuffs) {
+                const res = applyNpcStatusEffect(updatedTarget, { ...defEff, type: 'Debuff' });
+                updatedTarget = res.combatant;
+                if (res.applied) debuffNames.push(`${res.applied.icon}${res.applied.name}`);
+              }
+            }
+            nextEnemies = latestEnemies.map((e, i) => (i === tIdx ? updatedTarget : e));
+            hitFloats.push({
+              id: Date.now() + Math.floor(Math.random() * 10000),
+              target: 'enemy',
+              targetSlot: tIdx,
+              text: didCrit ? `CRIT -${computedDmg}!` : `-${computedDmg}`,
+              kind: didCrit ? 'crit' : 'damage',
+            });
+            hitLog =
+              atkAnim === 'attack_01'
+                ? `🤝 ${ally.name} attacked ${target.name} for ${computedDmg} DMG${didCrit ? ' (CRIT!)' : ''}!`
+                : `🤝 ${ally.name} cast Jutsu #${jutsuNum} on ${target.name} for ${computedDmg} DMG${didCrit ? ' (CRIT!)' : ''}${debuffNames.length ? ` + ${debuffNames.join(' ')}` : ''}!`;
+          }
+
+          armSequenceCallbacks(
+            () => {
+              setEnemies(nextEnemies);
+              setCombatLog(hitLog);
+              pushFloats(hitFloats);
+              if (didCrit) triggerCritShake();
+            },
+            () => {
+              const allDeadAfterAlly = nextEnemies.every((e) => e.hp <= 0);
+              if (allDeadAfterAlly) {
+                armSequenceCallbacks(null, () => concludeBattle(true));
+                stageRef.current?.playSequence('player_win');
+              } else {
+                stepTimeline(playerRef.current, nextEnemies, curCd);
+              }
+            }
+          );
+
+          stageRef.current?.playSequence(`a${allyIdx}_${atkAnim}_t${tIdx}${isKill ? '_kill' : ''}`);
+        }, Math.round(320 * delayScale));
         return;
       }
 
@@ -689,12 +1251,22 @@ export function BattleScreen() {
   const handleStageEvent = useCallback(
     (ev: StageEvent) => {
       if (ev.type === 'STAGE_READY') {
+        if (turnRef.current === 'done') return;
         setStageReady(true);
         stageRef.current?.setSpeed(speedRef.current);
-        const ids = equippedSkillsKey.split(',').filter(Boolean).slice(0, 6);
+        const ids = equippedSkillsKey.split(',').filter(Boolean).slice(0, 8);
         if (ids.length > 0) {
           const iconsUrl = buildSkillIconsSwfUrl(serverUrl, ids.join(','));
           stageRef.current?.captureSkillIcons(iconsUrl, ids);
+        }
+        // Also capture authentic HD SWF icons for the character's REAL owned Battle Consumables!
+        const ownedSwfIds = Object.entries(profile?.ownedItems ?? {})
+          .filter(([id, qty]) => qty > 0 && id !== 'item_01')
+          .map(([id]) => id)
+          .slice(0, 12);
+        if (ownedSwfIds.length > 0) {
+          const itemIconsUrl = buildIconSheetSwfUrl(serverUrl, 'consumables', ownedSwfIds.join(','));
+          stageRef.current?.captureSkillIcons(itemIconsUrl, ownedSwfIds);
         }
         setCombatLog(
           `${activeBattle?.mission.name ?? 'Battle'} — ${initialEnemies.length} enemy`
@@ -811,16 +1383,44 @@ export function BattleScreen() {
     [armSequenceCallbacks, concludeBattle, pushFloats, serverUrl, stageReady, stepTimeline, targetIdx, triggerCritShake, turn]
   );
 
-  const handleUseConsumable = (item: BattleConsumable) => {
+  const handleUseConsumable = (item: BattleConsumableTile) => {
     if (turn !== 'player' || !stageReady || item.qty <= 0) return;
     playClickSfx(serverUrl);
     setShowItems(false);
 
-    const out = executeConsumableAction(playerRef.current, cooldownsRef.current, item.id);
+    const curP = playerRef.current;
+    const nextCds: Record<string, number> = {};
+    for (const [k, v] of Object.entries(cooldownsRef.current)) {
+      if (v > 1) nextCds[k] = v - 1;
+    }
+
+    let nextPlayer: Combatant = { ...curP };
+    const itemFloats: FloatingNumber[] = [];
+    let itemLog = '';
+
+    if (item.effectKind === 'hp') {
+      const healAmt = item.restoreAmount > 0 ? item.restoreAmount : Math.max(45, Math.round(curP.maxHp * 0.35));
+      nextPlayer = { ...curP, hp: Math.min(curP.maxHp, curP.hp + healAmt) };
+      itemFloats.push({ id: Date.now(), target: 'player', text: `+${healAmt} HP`, kind: 'heal' });
+      itemLog = `${curP.name} used ${item.name} (+${healAmt} HP)!`;
+    } else if (item.effectKind === 'cp') {
+      const cpAmt = item.restoreAmount > 0 ? item.restoreAmount : Math.max(45, Math.round(curP.maxCp * 0.35));
+      nextPlayer = { ...curP, cp: Math.min(curP.maxCp, curP.cp + cpAmt) };
+      itemFloats.push({ id: Date.now(), target: 'player', text: `+${cpAmt} CP`, kind: 'cp' });
+      itemLog = `${curP.name} used ${item.name} (+${cpAmt} CP)!`;
+    } else {
+      nextPlayer = { ...curP, statuses: (curP.statuses ?? []).filter((s) => s.type !== 'Debuff') };
+      itemFloats.push({ id: Date.now(), target: 'player', text: 'PURIFIED!', kind: 'buff' });
+      itemLog = `${curP.name} used ${item.name} (Debuffs cleared)!`;
+    }
+
+    usedItemsRef.current[item.id] = (usedItemsRef.current[item.id] ?? 0) + 1;
     setConsumables((prev) =>
-      prev.map((c) => (c.id === item.id ? { ...c, qty: Math.max(0, c.qty - 1) } : c))
+      prev
+        .map((c) => (c.id === item.id ? { ...c, qty: Math.max(0, c.qty - 1) } : c))
+        .filter((c) => c.qty > 0)
     );
-    setCooldowns(out.cooldowns);
+    setCooldowns(nextCds);
     setTurn('animating');
 
     gaugesRef.current['player'] = 0;
@@ -829,21 +1429,21 @@ export function BattleScreen() {
 
     armSequenceCallbacks(
       () => {
-        setPlayer(out.player);
-        setCombatLog(out.log);
-        pushFloats(out.floats);
+        setPlayer(nextPlayer);
+        setCombatLog(itemLog);
+        pushFloats(itemFloats);
       },
       () => {
-        stepTimeline(out.player, enemiesRef.current, out.cooldowns);
+        stepTimeline(nextPlayer, enemiesRef.current, nextCds);
       }
     );
-    stageRef.current?.playSequence('player_charge');
+    stageRef.current?.playSequence('player_item');
   };
 
   // Auto-Battle Hook
   useEffect(() => {
     if (!autoBattle || turn !== 'player' || !stageReady || showFleeModal || inspectedUnit || inspectedSkill) return;
-    const delay = speed === 2 ? 220 : 420;
+    const delay = speed > 1 ? 280 : 420;
     const timer = setTimeout(() => {
       if (!mountedRef.current || !autoRef.current) return;
       const chosen = chooseAutoBattleAction(
@@ -866,6 +1466,7 @@ export function BattleScreen() {
     setCombatLog(res.log);
     if (res.escaped) {
       setAutoBattle(false);
+      clearTeam();
       setTimeout(() => {
         setActiveBattle(null);
         navigate('missions');
@@ -885,10 +1486,21 @@ export function BattleScreen() {
   const handleExit = () => {
     playClickSfx(serverUrl);
     clearWatchdogs();
+    clearTeam();
     setShowFleeModal(false);
     setAutoBattle(false);
+    const usedSnapshot = { ...usedItemsRef.current };
+    if (turnRef.current !== 'done' && Object.keys(usedSnapshot).length > 0 && profile && sessionKey && activeBattle) {
+      usedItemsRef.current = {};
+      api
+        .battleFinish(profile.charId, sessionKey, activeBattle.mission.id, activeBattle.token, false, usedSnapshot)
+        .then(() => api.getCharacter(profile.charId, sessionKey))
+        .then((raw) => useAuthStore.getState().setProfileFromRaw(profile.charId, raw))
+        .catch(() => {});
+    }
+    const isExamBattle = Boolean(activeBattle?.examContext);
     setActiveBattle(null);
-    navigate('missions');
+    navigate(isExamBattle ? 'headquarter' : 'missions');
   };
 
   const hpPct = (c: Combatant) => `${Math.max(0, Math.round((c.hp / Math.max(1, c.maxHp)) * 100))}%`;
@@ -938,18 +1550,18 @@ export function BattleScreen() {
         }
       }}
     >
-      {/* 1) FULL-SCREEN 1 LAYAR 36 FPS BATTLE STAGE (Background + Fighters + Jutsu) */}
-      <Animated.View style={[styles.fullStage, { transform: [{ translateX: shakeAnim }] }]}>
+      {/* 1) FULL-SCREEN 1 LAYAR 36 FPS BATTLE STAGE (Stationary Native GPU Hardware Layer — zero WebView shake stutter!) */}
+      <View style={styles.fullStage}>
         <RuffleStageView
           ref={stageRef}
           baseUrl={serverUrl}
           onEvent={handleStageEvent}
         />
-      </Animated.View>
+      </View>
 
       <LoadingScreenOverlay visible={!stageReady} />
 
-      {/* 2) TOP OVERLAY: Mission Info (Left) + Ninja Horizon ATB Timeline (Center) + Speed/Auto (Right) */}
+      {/* 2) TOP OVERLAY: Mission Info (Left) + Ninja Horizon Agility Rail (Center) + Speed/Auto (Right) */}
       <View style={styles.topOverlay} pointerEvents="box-none">
         <View style={styles.missionChip}>
           <Text style={styles.missionTitle} numberOfLines={1}>
@@ -963,13 +1575,15 @@ export function BattleScreen() {
           </View>
         </View>
 
-        {/* Ninja Horizon Top-Center Golden ATB Agility Rail */}
+        {/* Ninja Horizon Top-Center Golden Agility Rail (60 FPS Native GPU) */}
         <View style={styles.atbRailOuter}>
-          <View style={styles.atbStartCap}>
-            <Text style={styles.atbCapText}>ATB</Text>
-          </View>
-
-          <View style={styles.atbTrack}>
+          <View
+            style={styles.atbTrack}
+            onLayout={(e) => {
+              const w = e.nativeEvent.layout.width;
+              if (w > 40) setAtbTrackWidth((prev) => (Math.abs(prev - w) < 1 ? prev : w));
+            }}
+          >
             <View style={[styles.atbTick, { left: '25%' }]} />
             <View style={[styles.atbTick, { left: '50%' }]} />
             <View style={[styles.atbTick, { left: '75%' }]} />
@@ -985,6 +1599,7 @@ export function BattleScreen() {
                 isPlayer={true}
                 emoji="🥷"
                 turnKey={turnCount}
+                trackWidth={atbTrackWidth}
               />
             )}
 
@@ -999,8 +1614,27 @@ export function BattleScreen() {
                 isPet={true}
                 emoji="🐾"
                 turnKey={turnCount}
+                trackWidth={atbTrackWidth}
               />
             )}
+
+            {allies.map((al, idx) => {
+              if (al.hp <= 0) return null;
+              return (
+                <TimelineToken
+                  key={`atb-ally-${al.id}-${idx}`}
+                  id={`ally_${idx}`}
+                  name={al.name.slice(0, 4).toUpperCase()}
+                  agility={getEffectiveAgility(al)}
+                  gauge={timelineGauges[`ally_${idx}`] ?? 0}
+                  isActive={activeActorId === `ally_${idx}`}
+                  isPlayer={true}
+                  emoji="🤝"
+                  turnKey={turnCount}
+                  trackWidth={atbTrackWidth}
+                />
+              );
+            })}
 
             {enemies.map((en, idx) => {
               if (en.hp <= 0) return null;
@@ -1015,6 +1649,7 @@ export function BattleScreen() {
                   isPlayer={false}
                   emoji="👺"
                   turnKey={turnCount}
+                  trackWidth={atbTrackWidth}
                 />
               );
             })}
@@ -1025,16 +1660,8 @@ export function BattleScreen() {
           </View>
         </View>
 
-        {/* Speed (1x/2x) & AUTO Controls */}
+        {/* AUTO Control */}
         <View style={styles.topRightControls}>
-          <Pressable
-            style={[styles.ctrlPill, speed === 2 && styles.ctrlPillActive]}
-            onPress={toggleSpeed}
-          >
-            <Text style={[styles.ctrlPillText, speed === 2 && styles.ctrlPillTextActive]}>
-              {speed}x
-            </Text>
-          </Pressable>
           <Pressable
             style={[styles.ctrlPill, autoBattle && styles.ctrlAutoActive]}
             onPress={toggleAuto}
@@ -1047,7 +1674,7 @@ export function BattleScreen() {
       </View>
 
       {/* 3) PIXEL-ALIGNED HP & CP BARS BEHIND EACH CHARACTER (Symmetrical: Left of Player, Right of Enemies!) */}
-      <View style={styles.unitPlatesLayer} pointerEvents="box-none">
+      <View style={styles.unitPlatesLayer} pointerEvents="box-none" renderToHardwareTextureAndroid>
         {/* Player HP & CP Plate — directly behind Player (to the left) & vertically centered on torso; hold to inspect */}
         <Pressable
           delayLongPress={260}
@@ -1082,8 +1709,52 @@ export function BattleScreen() {
               CP {player.cp}/{player.maxCp}
             </Text>
           </View>
-          {renderStatusBadges(player.statuses)}
         </Pressable>
+
+        {/* Recruited Ally HP & CP Plates — directly behind each Ally (to the left); hold to inspect */}
+        {allies.map((al, idx) => {
+          const [axSwf, aySwf] = SWF_ALLY_POS[idx] ?? SWF_ALLY_POS[0];
+          const aPt = swfToScreen(axSwf, aySwf, stageSize.width, stageSize.height);
+          const dead = al.hp <= 0;
+          return (
+            <Pressable
+              key={`plate-ally-${al.id}-${idx}`}
+              delayLongPress={260}
+              onLongPress={() => {
+                playClickSfx(serverUrl);
+                setInspectedUnit({ side: 'ally', idx });
+              }}
+              style={[
+                styles.unitPlate,
+                styles.allyPlateBorder,
+                {
+                  left: Math.max(8, aPt.x - 40 * aPt.scale - UNIT_PLATE_W),
+                  top: aPt.y - SWF_CHAR_CENTER_Y_OFFSET * aPt.scale - UNIT_PLATE_H / 2,
+                },
+                dead && styles.enemyPlateDead,
+              ]}
+            >
+              <View style={styles.plateNameRow}>
+                <Text style={styles.plateName} numberOfLines={1}>
+                  {al.name}
+                </Text>
+                <Text style={styles.plateLv}>Lv.{al.level}</Text>
+              </View>
+              <View style={styles.unitBarBg}>
+                <View style={[styles.unitHpFill, { width: hpPct(al) as `${number}%` }]} />
+                <Text style={styles.unitBarText}>
+                  {dead ? 'KO' : `HP ${al.hp}/${al.maxHp}`}
+                </Text>
+              </View>
+              <View style={styles.unitBarBg}>
+                <View style={[styles.unitCpFill, { width: cpPct(al) as `${number}%` }]} />
+                <Text style={styles.unitBarText}>
+                  {dead ? '-' : `CP ${al.cp}/${al.maxCp}`}
+                </Text>
+              </View>
+            </Pressable>
+          );
+        })}
 
         {/* Enemy HP & CP Plates — directly behind each Enemy (to the right) & vertically aligned */}
         {enemies.map((en, idx) => {
@@ -1138,7 +1809,6 @@ export function BattleScreen() {
                   {dead ? '-' : `CP ${en.cp}/${en.maxCp}`}
                 </Text>
               </View>
-              {!dead && renderStatusBadges(en.statuses)}
             </Pressable>
           );
         })}
@@ -1169,32 +1839,39 @@ export function BattleScreen() {
         ))}
       </View>
 
-      {/* 5) COMPACT COMBAT LOG TOAST (Floats cleanly above Bottom Action Dock) */}
-      <View pointerEvents="none" style={styles.logToastWrap}>
-        <Text style={styles.logToastText} numberOfLines={1}>
-          {combatLog}
-        </Text>
-      </View>
-
-      {/* 6) BATTLE CONSUMABLES POPOVER */}
+      {/* 6) BATTLE CONSUMABLES POPOVER (Authentic SWF Icons in Jutsu-Style Tiles with Top-Right Level Badge!) */}
       {showItems && (
         <View style={styles.itemsDrawer}>
-          {consumables.map((item) => (
-            <Pressable
-              key={item.id}
-              style={[styles.itemChip, item.qty <= 0 && styles.disabledBtn]}
-              disabled={item.qty <= 0 || turn !== 'player'}
-              onPress={() => handleUseConsumable(item)}
-            >
-              <Text style={styles.itemIcon}>{item.icon}</Text>
-              <View>
-                <Text style={styles.itemName}>
-                  {item.name} (x{item.qty})
-                </Text>
-                <Text style={styles.itemDesc}>{item.desc}</Text>
-              </View>
-            </Pressable>
-          ))}
+          {consumables.map((item) => {
+            const iconUri = skillIcons[item.swfId];
+            const disabled = item.qty <= 0 || turn !== 'player';
+            return (
+              <Pressable
+                key={item.id}
+                style={[
+                  styles.itemJutsuTile,
+                  { backgroundColor: item.bgColor, borderColor: item.borderColor },
+                  disabled && styles.disabledBtn,
+                ]}
+                disabled={disabled}
+                onPress={() => handleUseConsumable(item)}
+              >
+                {iconUri ? (
+                  <Image source={{ uri: iconUri }} style={styles.itemTileIcon} resizeMode="cover" />
+                ) : (
+                  <Text style={styles.itemIcon}>{item.icon}</Text>
+                )}
+                {/* Level badge at top-right corner of the border */}
+                <View style={styles.itemLvBadge}>
+                  <Text style={styles.itemLvText}>Lv.{item.level}</Text>
+                </View>
+                {/* Quantity badge at bottom-right */}
+                <View style={styles.itemQtyBadge}>
+                  <Text style={styles.itemQtyText}>x{item.qty}</Text>
+                </View>
+              </Pressable>
+            );
+          })}
           <Pressable style={styles.itemCloseBtn} onPress={() => setShowItems(false)}>
             <Text style={styles.itemCloseTxt}>✕</Text>
           </Pressable>
@@ -1202,7 +1879,7 @@ export function BattleScreen() {
       )}
 
       {/* 7) NINJA HORIZON FLOATING BOTTOM ACTION DOCK (Attack, Charge, Elemental Jutsu, Item, Flee) */}
-      <View style={styles.bottomDockWrap} pointerEvents="box-none">
+      <View style={styles.bottomDockWrap} pointerEvents="box-none" renderToHardwareTextureAndroid>
         <View style={styles.bottomDock}>
           <AttackActionTile
             disabled={turn !== 'player' || !stageReady}
@@ -1217,7 +1894,7 @@ export function BattleScreen() {
 
           <View style={styles.dockDivider} />
 
-          {skills.slice(0, 6).map((sk) => {
+          {skills.slice(0, 8).map((sk) => {
             const cd = cooldowns[sk.id] ?? 0;
             const effCpCost = getEffectiveSkillCpCost(player, sk.cp_cost || 0);
             const noCp = player.cp < effCpCost;
@@ -1266,9 +1943,19 @@ export function BattleScreen() {
         const unit =
           inspectedUnit.side === 'player'
             ? player
+            : inspectedUnit.side === 'ally'
+            ? allies[inspectedUnit.idx]
             : enemies[inspectedUnit.idx];
         if (!unit) return null;
-        const isP = inspectedUnit.side === 'player';
+        const isFriendly = inspectedUnit.side === 'player' || inspectedUnit.side === 'ally';
+        const sideLabel =
+          inspectedUnit.side === 'player' ? 'NINJA' : inspectedUnit.side === 'ally' ? 'ALLY' : 'ENEMY';
+        const sideTagStyle =
+          inspectedUnit.side === 'player'
+            ? styles.inspectTagPlayer
+            : inspectedUnit.side === 'ally'
+            ? styles.inspectTagAlly
+            : styles.inspectTagEnemy;
         const effAgi = getEffectiveAgility(unit);
         const baseDmg = unit.weaponDamage ?? unit.baseDamage;
         const dmgMult = getOutgoingDamageMultiplier(unit);
@@ -1296,8 +1983,8 @@ export function BattleScreen() {
             <Pressable style={styles.inspectCard} onPress={() => {}}>
               <View style={styles.inspectHead}>
                 <View style={styles.inspectTitleWrap}>
-                  <View style={[styles.inspectSideTag, isP ? styles.inspectTagPlayer : styles.inspectTagEnemy]}>
-                    <Text style={styles.inspectSideText}>{isP ? 'NINJA' : 'ENEMY'}</Text>
+                  <View style={[styles.inspectSideTag, sideTagStyle]}>
+                    <Text style={styles.inspectSideText}>{sideLabel}</Text>
                   </View>
                   <Text style={styles.inspectName} numberOfLines={1}>
                     {unit.name}
@@ -1312,7 +1999,7 @@ export function BattleScreen() {
               {/* HP & CP Bars */}
               <View style={styles.inspectBarsRow}>
                 <View style={styles.inspectBarWrap}>
-                  <View style={[styles.unitHpFill, !isP && styles.unitEnemyHpFill, { width: hpPct(unit) as `${number}%` }]} />
+                  <View style={[styles.unitHpFill, !isFriendly && styles.unitEnemyHpFill, { width: hpPct(unit) as `${number}%` }]} />
                   <Text style={styles.inspectBarTxt}>HP {unit.hp} / {unit.maxHp}</Text>
                 </View>
                 <View style={styles.inspectBarWrap}>
@@ -1500,22 +2187,15 @@ export function BattleScreen() {
         );
       })()}
 
-      {/* Flee / Retreat Confirmation Modal */}
+      {/* Flee / Retreat Confirmation Modal (100% Retreat via Forfeit) */}
       {showFleeModal && (
         <View style={styles.resultOverlay}>
           <View style={styles.fleeCard}>
             <Text style={styles.fleeTitle}>Retreat from Battle?</Text>
             <Text style={styles.fleeSub}>
-              Attempt a Ninja Escape using your Agility, or forfeit the mission immediately.
+              Forfeit and retreat immediately from this battle?
             </Text>
             <View style={styles.fleeBtnRow}>
-              <Pressable
-                style={[styles.fleeModalBtn, styles.fleeTryBtn, turn !== 'player' && styles.disabledBtn]}
-                disabled={turn !== 'player'}
-                onPress={handleAttemptFlee}
-              >
-                <Text style={styles.doneBtnText}>Smoke Bomb</Text>
-              </Pressable>
               <Pressable style={[styles.fleeModalBtn, styles.fleeQuitBtn]} onPress={handleExit}>
                 <Text style={styles.doneBtnText}>Forfeit</Text>
               </Pressable>
@@ -1541,22 +2221,44 @@ export function BattleScreen() {
               <ActivityIndicator color="#F59E0B" style={{ marginVertical: 12 }} />
             ) : (
               <View style={styles.resultBody}>
-                <Text style={styles.rewardLine}>
-                  +{finishResult.xp_reward} XP  •  +{finishResult.gold_reward} Gold
-                </Text>
-                {finishResult.premium_bonus && (
-                  <Text style={styles.premBonusTxt}>★ Premium User +50% Bonus Active!</Text>
-                )}
-                <Text style={styles.rewardSub}>
-                  Current: Lv.{finishResult.level} | Total Gold: {finishResult.gold}
-                </Text>
-                {finishResult.level_up && (
-                  <Text style={styles.levelUp}>LEVEL UP! (+1 Attribute Point)</Text>
+                {activeBattle?.examContext ? (
+                  <>
+                    <Text style={styles.premBonusTxt}>
+                      {allDead
+                        ? `🏆 ${activeBattle.examContext.stageTitle} CLEARED!`
+                        : `Exam Stage Failed — Train & try again!`}
+                    </Text>
+                    <Text style={styles.rewardSub}>
+                      {activeBattle.examContext.examLabel}
+                    </Text>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.rewardLine}>
+                      +{finishResult.xp_reward} XP  •  +{finishResult.gold_reward} Gold
+                    </Text>
+                    {finishResult.premium_bonus && (
+                      <Text style={styles.premBonusTxt}>★ Premium User +50% Bonus Active!</Text>
+                    )}
+                    <Text style={styles.rewardSub}>
+                      Current: Lv.{finishResult.level} | Total Gold: {finishResult.gold}
+                    </Text>
+                    {finishResult.level_up && (
+                      <Text style={styles.levelUp}>LEVEL UP! (+1 Attribute Point)</Text>
+                    )}
+                    {finishResult.level_capped && finishResult.cap_exam && (
+                      <Text style={styles.premBonusTxt}>
+                        🔒 Level Cap — Clear {finishResult.cap_exam} at Headquarter to level up!
+                      </Text>
+                    )}
+                  </>
                 )}
               </View>
             )}
             <Pressable style={styles.doneBtn} onPress={handleExit}>
-              <Text style={styles.doneBtnText}>Back to Missions</Text>
+              <Text style={styles.doneBtnText}>
+                {activeBattle?.examContext ? 'Back to Headquarter' : 'Back to Missions'}
+              </Text>
             </Pressable>
           </View>
         </View>
@@ -1626,14 +2328,16 @@ const styles = StyleSheet.create({
   atbRailOuter: {
     flex: 1,
     maxWidth: 520,
+    minHeight: 38,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(7, 11, 20, 0.84)',
     borderRadius: 16,
     borderWidth: 1.5,
     borderColor: '#C8A24A',
-    paddingHorizontal: 4,
-    paddingVertical: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    overflow: 'visible',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.7,
@@ -1657,9 +2361,9 @@ const styles = StyleSheet.create({
   },
   atbTrack: {
     flex: 1,
-    height: 14,
+    height: 24,
     backgroundColor: '#0B1220',
-    borderRadius: 7,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: '#334155',
     position: 'relative',
@@ -1744,6 +2448,9 @@ const styles = StyleSheet.create({
   },
   playerPlateBorder: {
     borderColor: 'rgba(56, 189, 248, 0.75)',
+  },
+  allyPlateBorder: {
+    borderColor: 'rgba(52, 211, 153, 0.8)',
   },
   enemyPlateBorder: {
     borderColor: 'rgba(248, 113, 113, 0.6)',
@@ -1923,6 +2630,53 @@ const styles = StyleSheet.create({
     marginHorizontal: 1,
   },
 
+  itemJutsuTile: {
+    width: 44,
+    height: 44,
+    borderRadius: 9,
+    borderWidth: 1.75,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  itemTileIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 7,
+  },
+  itemLvBadge: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    backgroundColor: 'rgba(15, 23, 42, 0.92)',
+    borderBottomLeftRadius: 5,
+    borderLeftWidth: 0.75,
+    borderBottomWidth: 0.75,
+    borderColor: '#FACC15',
+    paddingHorizontal: 3.5,
+    paddingVertical: 0.5,
+  },
+  itemLvText: {
+    color: '#FDE047',
+    fontSize: 7.5,
+    fontWeight: '900',
+  },
+  itemQtyBadge: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    backgroundColor: 'rgba(2, 6, 23, 0.88)',
+    borderTopLeftRadius: 5,
+    paddingHorizontal: 3.5,
+    paddingVertical: 0.5,
+  },
+  itemQtyText: {
+    color: '#F8FAFC',
+    fontSize: 8,
+    fontWeight: '900',
+  },
+
   /* ── TOOLTIPS, ITEMS, MODALS ── */
   tooltipOverlay: {
     ...StyleSheet.absoluteFill,
@@ -2003,6 +2757,9 @@ const styles = StyleSheet.create({
   },
   inspectTagPlayer: {
     backgroundColor: '#0369A1',
+  },
+  inspectTagAlly: {
+    backgroundColor: '#047857',
   },
   inspectTagEnemy: {
     backgroundColor: '#B91C1C',

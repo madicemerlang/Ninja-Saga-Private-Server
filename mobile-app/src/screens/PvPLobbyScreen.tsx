@@ -192,7 +192,7 @@ export function PvPLobbyScreen() {
 
         <View style={styles.rightCard}>
           <Text style={styles.cardTitle}>Arena Battle Log</Text>
-          <ScrollView style={styles.logBox}>
+          <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} style={styles.logBox}>
             {events.map((e, i) => (
               <Text key={i} style={styles.logLine}>
                 {e}

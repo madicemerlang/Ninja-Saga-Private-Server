@@ -14,7 +14,7 @@ import { BUILDING_BGS } from '../components/BuildingSceneBackdrop';
 import { NinjaScrollWindow, NS_THEME } from '../components/NinjaScrollWindow';
 import { useAuthStore } from '../store/useAuthStore';
 
-const GRADE_TABS = ['ALL', 'C', 'B', 'A', 'S'] as const;
+const GRADE_TABS = ['C', 'B', 'A', 'S', 'DAILY', 'TP'] as const;
 
 export function MissionScreen() {
   const serverUrl = useAuthStore((s) => s.serverUrl);
@@ -24,7 +24,7 @@ export function MissionScreen() {
   const navigate = useAuthStore((s) => s.navigate);
 
   const [missions, setMissions] = useState<MissionDef[]>([]);
-  const [gradeTab, setGradeTab] = useState<(typeof GRADE_TABS)[number]>('ALL');
+  const [gradeTab, setGradeTab] = useState<(typeof GRADE_TABS)[number]>('C');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [startingId, setStartingId] = useState<string | null>(null);
@@ -35,18 +35,20 @@ export function MissionScreen() {
   useEffect(() => {
     loadGameData(serverUrl)
       .then((bundle) => {
-        const sorted = [...bundle.missions].sort((a, b) => (a.level || 0) - (b.level || 0));
-        const sliced = sorted.slice(0, 60);
-        setMissions(sliced);
-        if (sliced.length > 0) setSelectedId(sliced[0].id);
+        const visibleMissions = bundle.missions
+          .filter((m) => m.visible !== false && Boolean(m.grade))
+          .sort((a, b) => (a.level || 0) - (b.level || 0));
+        setMissions(visibleMissions);
+        const firstC = visibleMissions.find((m) => (m.grade || '').toUpperCase() === 'C');
+        if (firstC) setSelectedId(firstC.id);
+        else if (visibleMissions.length > 0) setSelectedId(visibleMissions[0].id);
       })
       .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));
   }, [serverUrl]);
 
   const filteredMissions = useMemo(() => {
-    if (gradeTab === 'ALL') return missions;
-    return missions.filter((m) => (m.grade || 'C').toUpperCase() === gradeTab);
+    return missions.filter((m) => (m.grade || '').toUpperCase() === gradeTab);
   }, [missions, gradeTab]);
 
   const selectedMission = useMemo(
@@ -98,7 +100,7 @@ export function MissionScreen() {
               }}
             >
               <Text style={[styles.gradeTabTxt, gradeTab === g && styles.gradeTabTxtActive]}>
-                {g === 'ALL' ? 'All' : `Grade ${g}`}
+                {g === 'DAILY' ? 'Daily' : g === 'TP' ? 'TP' : `Grade ${g}`}
               </Text>
             </Pressable>
           ))}
@@ -110,15 +112,19 @@ export function MissionScreen() {
       {loading ? (
         <View style={styles.center}>
           <ActivityIndicator color={NS_THEME.btnOrange} size="large" />
-          <Text style={styles.loadingText}>Memuat daftar misi...</Text>
+          <Text style={styles.loadingText}>Loading missions...</Text>
         </View>
       ) : (
         <View style={styles.split}>
           {/* Left: Authentic Ninja Saga Mission Scroll List */}
-          <ScrollView style={styles.listCol} contentContainerStyle={styles.listContent}>
+          <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} style={styles.listCol} contentContainerStyle={styles.listContent}>
             {filteredMissions.map((m) => {
               const locked = (profile?.level ?? 1) < (m.level || 1);
               const isSelected = selectedMission?.id === m.id;
+              const badgeTxt =
+                (m.grade || 'C').toUpperCase() === 'DAILY'
+                  ? 'D'
+                  : (m.grade || 'C').toUpperCase();
               return (
                 <Pressable
                   key={m.id}
@@ -133,7 +139,7 @@ export function MissionScreen() {
                   }}
                 >
                   <View style={styles.gradeSeal}>
-                    <Text style={styles.gradeSealTxt}>{(m.grade || 'C').toUpperCase()}</Text>
+                    <Text style={styles.gradeSealTxt}>{badgeTxt}</Text>
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.rowName} numberOfLines={1}>
@@ -141,6 +147,7 @@ export function MissionScreen() {
                     </Text>
                     <Text style={styles.rowSub}>
                       Lv.{m.level} • +{m.rewards?.xp ?? 0} XP • +{m.rewards?.gold ?? 0} Gold
+                      {(m.rewards?.tp ?? 0) > 0 ? ` • +${m.rewards?.tp} TP` : ''}
                     </Text>
                   </View>
                   {locked ? (
@@ -160,25 +167,28 @@ export function MissionScreen() {
                 <View style={styles.detailHeader}>
                   <View style={styles.bigGradeSeal}>
                     <Text style={styles.bigGradeTxt}>
-                      {(selectedMission.grade || 'C').toUpperCase()}
+                      {(selectedMission.grade || 'C').toUpperCase() === 'DAILY'
+                        ? 'D'
+                        : (selectedMission.grade || 'C').toUpperCase()}
                     </Text>
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.detailTitle}>{selectedMission.name}</Text>
                     <Text style={styles.detailReq}>
-                      Min. Level {selectedMission.level} • {selectedMission.enemies?.length ?? 1} Musuh
+                      Min. Level {selectedMission.level} • {selectedMission.enemies?.length ?? 1}{' '}
+                      {(selectedMission.enemies?.length ?? 1) === 1 ? 'Enemy' : 'Enemies'}
                     </Text>
                   </View>
                 </View>
 
-                <ScrollView style={styles.descScroll}>
+                <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} style={styles.descScroll}>
                   <Text style={styles.detailDesc}>
-                    {selectedMission.description || 'Selesaikan misi shinobi ini untuk melindungi desa!'}
+                    {selectedMission.description || 'Complete this shinobi mission to protect the village!'}
                   </Text>
                 </ScrollView>
 
                 <View style={styles.rewardBox}>
-                  <Text style={styles.rewardHeading}>HADIAH MISI</Text>
+                  <Text style={styles.rewardHeading}>MISSION REWARDS</Text>
                   <View style={styles.rewardRow}>
                     <View style={styles.rewardChip}>
                       <Text style={styles.rewardChipTxt}>
@@ -190,6 +200,13 @@ export function MissionScreen() {
                         🪙 +{(selectedMission.rewards?.gold ?? 0).toLocaleString()} Gold
                       </Text>
                     </View>
+                    {(selectedMission.rewards?.tp ?? 0) > 0 ? (
+                      <View style={styles.rewardChip}>
+                        <Text style={styles.rewardChipTxt}>
+                          ✨ +{(selectedMission.rewards?.tp ?? 0).toLocaleString()} TP
+                        </Text>
+                      </View>
+                    ) : null}
                   </View>
                 </View>
 
@@ -203,16 +220,16 @@ export function MissionScreen() {
                 >
                   <Text style={styles.fightText}>
                     {selectedBusy
-                      ? 'Memulai Pertarungan...'
+                      ? 'Starting Battle...'
                       : selectedLocked
-                        ? `Butuh Level ${selectedMission.level}`
-                        : '⚔️ Mulai Misi (Fight)'}
+                        ? `Requires Level ${selectedMission.level}`
+                        : '⚔️ Start Mission'}
                   </Text>
                 </Pressable>
               </>
             ) : (
               <View style={styles.center}>
-                <Text style={styles.loadingText}>Tidak ada misi di grade ini.</Text>
+                <Text style={styles.loadingText}>No missions available in this category.</Text>
               </View>
             )}
           </View>

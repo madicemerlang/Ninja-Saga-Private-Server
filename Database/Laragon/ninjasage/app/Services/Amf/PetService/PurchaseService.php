@@ -48,8 +48,36 @@ class PurchaseService
                     return ['status' => 6]; // Triggers EmblemUpgrade popup
                 }
 
-                $priceGold = $petConfig->price_gold ?? 0;
-                $priceTokens = $petConfig->price_tokens ?? 0;
+                $priceGold = (int) ($petConfig->price_gold ?? 0);
+                $priceTokens = (int) ($petConfig->price_tokens ?? 0);
+
+                // Resolve authentic Ninja Sage Pet Shop pricing from gamedata.json
+                $gdPath = public_path('game_data/gamedata.json');
+                if (is_file($gdPath)) {
+                    $gd = json_decode((string) file_get_contents($gdPath), true);
+                    if (is_array($gd)) {
+                        foreach ($gd as $sec) {
+                            if (($sec['id'] ?? '') === 'pet_shop' && is_array($sec['data']['pets'] ?? null)) {
+                                foreach ($sec['data']['pets'] as $sp) {
+                                    if (($sp['id'] ?? '') === $petId && preg_match('/^(gold|token)_(\d+)(M|K)?$/i', (string) ($sp['price'] ?? ''), $m)) {
+                                        $val = (int) $m[2];
+                                        $unit = strtoupper($m[3] ?? '');
+                                        if ($unit === 'M') $val *= 1000000;
+                                        elseif ($unit === 'K') $val *= 1000;
+                                        if (strtolower($m[1]) === 'token') {
+                                            $priceTokens = $val;
+                                            $priceGold = 0;
+                                        } else {
+                                            $priceGold = $val;
+                                            $priceTokens = 0;
+                                        }
+                                        break 2;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if ($char->gold < $priceGold || $user->tokens < $priceTokens) return ['status' => 3, 'result' => 'Not enough resources!'];
 

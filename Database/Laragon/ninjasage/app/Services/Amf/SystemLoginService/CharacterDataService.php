@@ -67,7 +67,7 @@ class CharacterDataService
         ];
 
         $defaultSkill = $elementSkillMap[$char->element_1] ?? 'skill_01';
-        $equippedSkills = $char->equipment_skills ?: $defaultSkill;
+        $equippedSkills = $char->equipment_skills !== null ? (string) $char->equipment_skills : $defaultSkill;
 
         // Fetch Equipped Pet
         $petData = [];

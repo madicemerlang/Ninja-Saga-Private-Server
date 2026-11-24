@@ -94,21 +94,6 @@ class StageService
             }
 
             $char->jounin_exam_progress = implode(',', $progress);
-
-            // Auto-promote if all stages are completed
-            $allCompleted = true;
-            foreach ($progress as $p) {
-                if ($p !== "2") {
-                    $allCompleted = false;
-                    break;
-                }
-            }
-
-            if ($allCompleted && $char->rank < 5) {
-                $char->rank = 5;
-                Log::info("Jounin Auto-Promotion for Char $charId after Stage $stageId");
-            }
-
             $char->save();
         }
 

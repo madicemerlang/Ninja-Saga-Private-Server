@@ -2,6 +2,7 @@ import React, { forwardRef, useImperativeHandle, useMemo, useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { WebView, type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
 import { DEFAULT_RUFFLE_SCRIPT_URL } from '../config/env';
+import { useAuthStore } from '../store/useAuthStore';
 import { buildRuffleStageHtml } from './stageHtml';
 
 const TypedWebView = WebView as unknown as React.ComponentType<
@@ -27,7 +28,7 @@ export interface RuffleStageHandle {
   playSequence: (seq: string) => void;
   preloadSwfs: (urls: string[]) => void;
   captureSkillIcons: (url: string, skillIds: string[]) => void;
-  setSpeed: (speed: 1 | 2) => void;
+  setSpeed: (speed: 1 | 1.5) => void;
   setHoldFrames: (held: boolean) => void;
   pumpFrame: () => void;
   requestMemoryReport: () => void;
@@ -50,10 +51,13 @@ export const RuffleStageView = forwardRef<RuffleStageHandle, RuffleStageViewProp
     ref
   ) {
     const webViewRef = useRef<WebView>(null);
+    const bridgeReadyRef = useRef(false);
+    const pendingSwfUrlRef = useRef<string | null>(null);
+    const graphicsQuality = useAuthStore((s) => s.graphicsQuality);
 
     const html = useMemo(
-      () => buildRuffleStageHtml(ruffleScriptUrl),
-      [ruffleScriptUrl]
+      () => buildRuffleStageHtml(ruffleScriptUrl, graphicsQuality),
+      [ruffleScriptUrl, graphicsQuality]
     );
 
     const sendCommand = (cmd: Record<string, unknown>) => {
@@ -64,21 +68,38 @@ export const RuffleStageView = forwardRef<RuffleStageHandle, RuffleStageViewProp
     };
 
     useImperativeHandle(ref, () => ({
-      loadSwf: (url: string) => sendCommand({ type: 'LOAD_SWF', url }),
+      loadSwf: (url: string) => {
+        if (!bridgeReadyRef.current) {
+          pendingSwfUrlRef.current = url;
+          return;
+        }
+        sendCommand({ type: 'LOAD_SWF', url });
+      },
       playSequence: (seq: string) => sendCommand({ type: 'PLAY_SEQ', seq }),
       preloadSwfs: (urls: string[]) => sendCommand({ type: 'PRELOAD_SWFS', urls }),
       captureSkillIcons: (url: string, skillIds: string[]) =>
         sendCommand({ type: 'CAPTURE_SKILL_ICONS', url, skillIds }),
-      setSpeed: (speed: 1 | 2) => sendCommand({ type: 'SET_SPEED', speed }),
+      setSpeed: (speed: 1 | 1.5) => sendCommand({ type: 'SET_SPEED', speed }),
       setHoldFrames: (held: boolean) => sendCommand({ type: 'HOLD_FRAMES', held }),
       pumpFrame: () => sendCommand({ type: 'PUMP_FRAME' }),
       requestMemoryReport: () => sendCommand({ type: 'GET_MEMORY' }),
-      clearStage: () => sendCommand({ type: 'CLEAR_STAGE' }),
+      clearStage: () => {
+        pendingSwfUrlRef.current = null;
+        sendCommand({ type: 'CLEAR_STAGE' });
+      },
     }));
 
     const handleMessage = (e: WebViewMessageEvent) => {
       try {
         const parsed = JSON.parse(e.nativeEvent.data) as StageEvent;
+        if (parsed.type === 'BRIDGE_READY') {
+          bridgeReadyRef.current = true;
+          if (pendingSwfUrlRef.current) {
+            const queued = pendingSwfUrlRef.current;
+            pendingSwfUrlRef.current = null;
+            sendCommand({ type: 'LOAD_SWF', url: queued });
+          }
+        }
         onEvent?.(parsed);
       } catch {
         onEvent?.({ type: 'STAGE_ERROR', message: `Malformed bridge payload: ${e.nativeEvent.data}` });
@@ -86,7 +107,7 @@ export const RuffleStageView = forwardRef<RuffleStageHandle, RuffleStageViewProp
     };
 
     return (
-      <View style={styles.container}>
+      <View style={styles.container} renderToHardwareTextureAndroid shouldRasterizeIOS>
         <TypedWebView
           ref={webViewRef}
           source={{

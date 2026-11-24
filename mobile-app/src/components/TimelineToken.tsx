@@ -17,13 +17,14 @@ export interface TimelineTokenProps {
   isPet?: boolean;
   emoji?: string;
   turnKey?: number;
+  trackWidth?: number;
 }
 
 /**
- * Ninja Horizon-styled circular ATB medallion marker that glides smoothly
- * along the golden top-center ATB rail toward the ACT emblem.
+ * Ninja Horizon-styled circular ATB medallion marker that glides at locked 60 FPS
+ * on the native GPU compositor (`useNativeDriver: true` via `translateX` + `scale`).
  */
-export function TimelineToken({
+export const TimelineToken = React.memo(function TimelineToken({
   name,
   gauge,
   isActive,
@@ -31,6 +32,7 @@ export function TimelineToken({
   isPet,
   emoji,
   turnKey,
+  trackWidth = 360,
 }: TimelineTokenProps) {
   const animGauge = useRef(new Animated.Value(gauge)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -49,9 +51,9 @@ export function TimelineToken({
       animGauge.setValue(0);
       Animated.timing(animGauge, {
         toValue: 100,
-        duration: 460,
+        duration: 380,
         easing: Easing.out(Easing.cubic),
-        useNativeDriver: false,
+        useNativeDriver: true,
       }).start();
       return;
     }
@@ -59,9 +61,9 @@ export function TimelineToken({
     const isReset = gauge === 0;
     Animated.timing(animGauge, {
       toValue: Math.max(0, Math.min(100, gauge)),
-      duration: isReset ? 200 : 460,
-      easing: isReset ? Easing.linear : Easing.out(Easing.cubic),
-      useNativeDriver: false,
+      duration: isReset ? 160 : 380,
+      easing: isReset ? Easing.out(Easing.quad) : Easing.out(Easing.cubic),
+      useNativeDriver: true,
     }).start();
   }, [gauge, turnKey, isActive, animGauge]);
 
@@ -70,16 +72,16 @@ export function TimelineToken({
       const loop = Animated.loop(
         Animated.sequence([
           Animated.timing(pulseAnim, {
-            toValue: 1.16,
-            duration: 320,
-            easing: Easing.inOut(Easing.quad),
-            useNativeDriver: false,
+            toValue: 1.15,
+            duration: 300,
+            easing: Easing.inOut(Easing.sin),
+            useNativeDriver: true,
           }),
           Animated.timing(pulseAnim, {
             toValue: 1.0,
-            duration: 320,
-            easing: Easing.inOut(Easing.quad),
-            useNativeDriver: false,
+            duration: 300,
+            easing: Easing.inOut(Easing.sin),
+            useNativeDriver: true,
           }),
         ])
       );
@@ -90,9 +92,12 @@ export function TimelineToken({
     }
   }, [isActive, pulseAnim]);
 
-  const leftInterpolated = animGauge.interpolate({
+  const usableW = Math.max(80, trackWidth);
+  const startX = usableW * 0.02 - 12;
+  const endX = usableW * 0.98 - 12;
+  const translateX = animGauge.interpolate({
     inputRange: [0, 100],
-    outputRange: ['2%', '98%'],
+    outputRange: [startX, endX],
     extrapolate: 'clamp',
   });
 
@@ -100,12 +105,12 @@ export function TimelineToken({
 
   return (
     <Animated.View
+      renderToHardwareTextureAndroid
       style={[
         styles.markerWrap,
         isActive && styles.markerActiveZ,
         {
-          left: leftInterpolated,
-          transform: [{ translateX: -12 }, { scale: pulseAnim }],
+          transform: [{ translateX }, { scale: pulseAnim }],
         },
       ]}
     >
@@ -131,12 +136,13 @@ export function TimelineToken({
       </View>
     </Animated.View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   markerWrap: {
     position: 'absolute',
-    top: -6,
+    left: 0,
+    top: -4,
     alignItems: 'center',
     zIndex: 10,
   },

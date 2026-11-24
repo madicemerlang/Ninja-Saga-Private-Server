@@ -129,17 +129,45 @@ class Character extends Model
     }
 
     /**
-     * Get max level for current rank.
+     * Get max level for current rank (strictly enforces Exam caps at Lv.20, 40, 60, and 80).
      */
     public function getMaxLevel(): int
     {
-        return match ($this->rank) {
-            self::RANK_GENIN => 20,
-            self::RANK_CHUNIN => 40,
-            self::RANK_JOUNIN => 60,
-            self::RANK_SPECIAL_JOUNIN => 80,
-            default => 85,
-        };
+        $rank = (int) $this->rank;
+        if ($rank < self::RANK_CHUNIN) {
+            return 20;
+        }
+        if ($rank < self::RANK_JOUNIN) {
+            return 40;
+        }
+        if ($rank < self::RANK_SPECIAL_JOUNIN) {
+            return 60;
+        }
+        if ($rank < self::RANK_SANNIN) {
+            return 80;
+        }
+        return 85;
+    }
+
+    /**
+     * Returns the required Headquarter Exam name blocking further level-ups, or null if uncapped.
+     */
+    public function getNextExamName(): ?string
+    {
+        $rank = (int) $this->rank;
+        if ($rank < self::RANK_CHUNIN) {
+            return 'Chunin Exam';
+        }
+        if ($rank < self::RANK_JOUNIN) {
+            return 'Jounin Exam';
+        }
+        if ($rank < self::RANK_SPECIAL_JOUNIN) {
+            return 'Special Jounin Exam';
+        }
+        if ($rank < self::RANK_SANNIN) {
+            return 'Ninja Tutor Exam';
+        }
+        return null;
     }
 
     /**
@@ -147,16 +175,17 @@ class Character extends Model
      */
     public function isLevelCapped(): bool
     {
-        return $this->level >= $this->getMaxLevel();
+        return (int) $this->level >= $this->getMaxLevel();
     }
 
     /**
-     * Add XP and handle leveling up with rank caps.
+     * Add XP and handle leveling up with rank caps (Lv.20 / 40 / 60 / 80 require clearing Exam).
      * Returns true if level up occurred.
      */
     public function addXp(int $amount): bool
     {
-        $this->xp += $amount;
+        $this->level = (int) $this->level;
+        $this->xp = (int) $this->xp + $amount;
         $levelUp = false;
         $maxLevel = $this->getMaxLevel();
 
@@ -172,13 +201,13 @@ class Character extends Model
                 break;
             }
         }
-        
-        // If at rank cap, clamp XP to the requirement for the next level
+
+        // If at rank exam cap (Lv.20/40/60/80), block further level-up & clamp XP until Exam is cleared
         if ($this->level >= $maxLevel) {
-             $xpReq = XP::where('level', $this->level)->value('character_xp');
-             if ($xpReq && $this->xp > $xpReq) {
-                 $this->xp = $xpReq;
-             }
+            $xpReq = XP::where('level', $this->level)->value('character_xp');
+            if ($xpReq && $this->xp > $xpReq) {
+                $this->xp = $xpReq;
+            }
         }
 
         $this->save();

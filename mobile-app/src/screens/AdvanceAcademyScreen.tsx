@@ -1,38 +1,51 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { MobileApiClient } from '../api/client';
 import { loadGameData, type SkillDef } from '../api/gameData';
 import { playClickSfx } from '../audio/audioManager';
 import { BUILDING_BGS } from '../components/BuildingSceneBackdrop';
+import { JutsuPreviewModal } from '../components/JutsuPreviewModal';
 import { NinjaScrollWindow, NS_THEME } from '../components/NinjaScrollWindow';
-import { buildPlayerSkillSwfUrl } from '../config/env';
-import { getSkillElementMeta, isSkillAoE } from '../engine/battleEngine';
-import { RuffleStageView, type RuffleStageHandle } from '../stage/RuffleStageView';
+import { NinjaToast } from '../components/NinjaToast';
+import { buildIconSheetSwfUrl, buildSwfAssetUrl } from '../config/env';
+import { isSkillAoE } from '../engine/battleEngine';
+import { RuffleStageView, type RuffleStageHandle, type StageEvent } from '../stage/RuffleStageView';
 import { useAuthStore } from '../store/useAuthStore';
 
 type AcademyMode = 'learn' | 'advance';
 
-const LEARN_ELEMENT_TABS: Array<{ type: string; label: string; icon: string; color: string }> = [
-  { type: '1', label: 'Wind', icon: '🌪️', color: '#15803D' },
-  { type: '2', label: 'Fire', icon: '🔥', color: '#B91C1C' },
-  { type: '3', label: 'Lightning', icon: '⚡', color: '#A16207' },
-  { type: '4', label: 'Earth', icon: '🪨', color: '#78350F' },
-  { type: '5', label: 'Water', icon: '💧', color: '#1D4ED8' },
-  { type: '6', label: 'Taijutsu', icon: '👊', color: '#9A3412' },
-  { type: '7', label: 'Genjutsu', icon: '👁️', color: '#6D28D9' },
+const LEARN_TABS: Array<{ type: string; elemId: number | null; label: string; icon: string; color: string }> = [
+  { type: '1', elemId: 1, label: 'Wind', icon: '💨', color: '#059669' },
+  { type: '2', elemId: 2, label: 'Fire', icon: '🔥', color: '#DC2626' },
+  { type: '3', elemId: 3, label: 'Lightning', icon: '⚡', color: '#CA8A04' },
+  { type: '4', elemId: 4, label: 'Earth', icon: '🪨', color: '#B45309' },
+  { type: '5', elemId: 5, label: 'Water', icon: '💧', color: '#0284C7' },
+  { type: '6', elemId: null, label: 'Taijutsu', icon: '🥋', color: '#C2410C' },
+  { type: '7', elemId: null, label: 'Genjutsu', icon: '👁️', color: '#7C3AED' },
 ];
 
-const ADVANCE_ELEM_TABS = ['fire', 'wind', 'thunder', 'earth', 'water', 'genjutsu'] as const;
+const ADVANCE_TABS: Array<{ key: string; elemId: number | null; label: string; icon: string }> = [
+  { key: 'wind', elemId: 1, label: 'Wind', icon: '💨' },
+  { key: 'fire', elemId: 2, label: 'Fire', icon: '🔥' },
+  { key: 'thunder', elemId: 3, label: 'Lightning', icon: '⚡' },
+  { key: 'earth', elemId: 4, label: 'Earth', icon: '🪨' },
+  { key: 'water', elemId: 5, label: 'Water', icon: '💧' },
+  { key: 'genjutsu', elemId: null, label: 'Genjutsu', icon: '👁️' },
+];
+
+const PAGE_SIZE = 24;
 
 export function AdvanceAcademyScreen() {
-  const stageRef = useRef<RuffleStageHandle>(null);
+  const iconBridgeRef = useRef<RuffleStageHandle>(null);
 
   const serverUrl = useAuthStore((s) => s.serverUrl);
   const sessionKey = useAuthStore((s) => s.sessionKey);
@@ -42,9 +55,32 @@ export function AdvanceAcademyScreen() {
 
   const api = useMemo(() => new MobileApiClient(serverUrl), [serverUrl]);
 
+  const learnedElements = useMemo(
+    () =>
+      new Set(
+        [profile?.element1, profile?.element2, profile?.element3].filter(
+          (e): e is number => typeof e === 'number' && e >= 1 && e <= 5
+        )
+      ),
+    [profile?.element1, profile?.element2, profile?.element3]
+  );
+
+  const visibleLearnTabs = useMemo(
+    () => LEARN_TABS.filter((t) => t.elemId === null || learnedElements.has(t.elemId)),
+    [learnedElements]
+  );
+
+  const visibleAdvanceTabs = useMemo(
+    () => ADVANCE_TABS.filter((t) => t.elemId === null || learnedElements.has(t.elemId)),
+    [learnedElements]
+  );
+
   const [mode, setMode] = useState<AcademyMode>('learn');
-  const [learnType, setLearnType] = useState<string>(() => String(profile?.element1 || '2'));
-  const [advElem, setAdvElem] = useState<string>('fire');
+  const [learnType, setLearnType] = useState<string>(() => visibleLearnTabs[0]?.type ?? '6');
+  const [advElem, setAdvElem] = useState<string>(() => visibleAdvanceTabs[0]?.key ?? 'genjutsu');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -52,11 +88,31 @@ export function AdvanceAcademyScreen() {
   const [allSkills, setAllSkills] = useState<SkillDef[]>([]);
   const [skillsById, setSkillsById] = useState<Record<string, SkillDef>>({});
   const [chains, setChains] = useState<Record<string, Record<string, string[]>>>({});
-  const [selectedSkillId, setSelectedSkillId] = useState<string>('skill_01');
+  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
+  const [selectedChainKey, setSelectedChainKey] = useState<string | null>(null);
+  const [previewSkill, setPreviewSkill] = useState<{ id: string; name: string } | null>(null);
 
-  const equipTag = profile
-    ? `${profile.hairStyle}_${profile.clothing}_${profile.weapon}_${profile.back}`
-    : '';
+  const [bridgeReady, setBridgeReady] = useState(false);
+  const [iconUris, setIconUris] = useState<Record<string, string>>({});
+  const requestedIconsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!message) return;
+    const t = setTimeout(() => setMessage(null), 2000);
+    return () => clearTimeout(t);
+  }, [message]);
+
+  useEffect(() => {
+    if (visibleLearnTabs.length > 0 && !visibleLearnTabs.some((t) => t.type === learnType)) {
+      setLearnType(visibleLearnTabs[0].type);
+    }
+  }, [visibleLearnTabs, learnType]);
+
+  useEffect(() => {
+    if (visibleAdvanceTabs.length > 0 && !visibleAdvanceTabs.some((t) => t.key === advElem)) {
+      setAdvElem(visibleAdvanceTabs[0].key);
+    }
+  }, [visibleAdvanceTabs, advElem]);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -66,7 +122,7 @@ export function AdvanceAcademyScreen() {
       setSkillsById(gd.skillsById ?? {});
       setAllSkills(gd.skills ?? []);
     } catch (err) {
-      setMessage(`Gagal memuat Ninja Academy: ${String(err)}`);
+      setMessage(`Failed to load Ninja Academy: ${String(err)}`);
     } finally {
       setLoading(false);
     }
@@ -79,30 +135,74 @@ export function AdvanceAcademyScreen() {
   const ownedSet = useMemo(() => new Set(profile?.ownedSkills ?? []), [profile?.ownedSkills]);
   const equippedSet = useMemo(() => new Set(profile?.equippedSkills ?? []), [profile?.equippedSkills]);
 
-  // Authentic Ninja Saga Academy catalog: ALL buyable jutsus for the selected Element tab!
   const learnCatalog = useMemo(() => {
+    const q = search.trim().toLowerCase();
     return allSkills
-      .filter((s) => s.buyable && String(s.type) === learnType)
+      .filter((s) => {
+        if (!s.buyable || String(s.type) !== learnType) return false;
+        if (q && !s.name.toLowerCase().includes(q) && !s.description.toLowerCase().includes(q)) {
+          return false;
+        }
+        return true;
+      })
       .sort((a, b) => a.level - b.level || a.price_gold - b.price_gold || a.price_tokens - b.price_tokens);
-  }, [allSkills, learnType]);
+  }, [allSkills, learnType, search]);
 
-  // Keep selectedSkillId synced when changing element tab
+  const totalPages = Math.max(1, Math.ceil(learnCatalog.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pagedLearn = useMemo(() => {
+    const start = (safePage - 1) * PAGE_SIZE;
+    return learnCatalog.slice(start, start + PAGE_SIZE);
+  }, [learnCatalog, safePage]);
+
+  const currentChainEntries = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return Object.entries(chains[advElem] ?? {}).filter(([key, ids]) => {
+      if (!q) return true;
+      return (
+        key.toLowerCase().includes(q) ||
+        ids.some((id) => (skillsById[id]?.name ?? id).toLowerCase().includes(q))
+      );
+    });
+  }, [chains, advElem, search, skillsById]);
+
+  const selectedLearnSkill = useMemo(
+    () => pagedLearn.find((s) => s.id === selectedSkillId) ?? pagedLearn[0] ?? null,
+    [pagedLearn, selectedSkillId]
+  );
+
+  const selectedChain = useMemo(
+    () =>
+      currentChainEntries.find(([k]) => k === selectedChainKey) ?? currentChainEntries[0] ?? null,
+    [currentChainEntries, selectedChainKey]
+  );
+
+  // Capture HD SWF icons only for visible items
   useEffect(() => {
-    if (mode !== 'learn' || learnCatalog.length === 0) return;
-    if (!learnCatalog.some((s) => s.id === selectedSkillId)) {
-      setSelectedSkillId(learnCatalog[0].id);
+    if (!bridgeReady) return;
+    const targetIds =
+      mode === 'learn'
+        ? pagedLearn.map((s) => s.id)
+        : currentChainEntries.flatMap(([, ids]) => ids);
+    const missing = Array.from(new Set(targetIds)).filter(
+      (id) => Boolean(id) && !iconUris[id] && !requestedIconsRef.current.has(id)
+    );
+    if (missing.length === 0) return;
+
+    missing.forEach((id) => requestedIconsRef.current.add(id));
+    for (let i = 0; i < missing.length; i += 12) {
+      const chunk = missing.slice(i, i + 12);
+      const url = buildIconSheetSwfUrl(serverUrl, 'skills', chunk.join(','));
+      iconBridgeRef.current?.captureSkillIcons(url, chunk);
     }
-  }, [mode, learnCatalog, selectedSkillId]);
+  }, [bridgeReady, serverUrl, mode, pagedLearn, currentChainEntries, iconUris]);
 
-  // Load live 36 FPS Ruffle Jutsu preview when selectedSkillId changes
-  useEffect(() => {
-    if (mode !== 'learn' || !profile || !selectedSkillId) return;
-    const timer = setTimeout(() => {
-      const url = buildPlayerSkillSwfUrl(serverUrl, profile.charId, selectedSkillId, equipTag);
-      stageRef.current?.loadSwf(url);
-    }, 220);
-    return () => clearTimeout(timer);
-  }, [mode, serverUrl, profile, selectedSkillId, equipTag]);
+  const handleBridgeEvent = useCallback((ev: StageEvent) => {
+    if (ev.type === 'BRIDGE_READY') setBridgeReady(true);
+    else if (ev.type === 'SKILL_ICONS' && ev.icons) {
+      setIconUris((prev) => ({ ...prev, ...ev.icons }));
+    }
+  }, []);
 
   const refreshProfile = async () => {
     if (!profile || !sessionKey) return;
@@ -123,10 +223,10 @@ export function AdvanceAcademyScreen() {
         { sessionKey, charId: profile.charId }
       );
       if ((res.data?.status as number) === 1) {
-        setMessage(`Berhasil mempelajari ${skill.name}!`);
+        setMessage(`Learned ${skill.name}!`);
         await refreshProfile();
       } else {
-        setMessage(String(res.data?.result ?? res.data?.error ?? 'Gagal mempelajari Jutsu.'));
+        setMessage(String(res.data?.result ?? res.data?.error ?? 'Failed to learn Jutsu.'));
       }
     } catch (err) {
       setMessage(String(err instanceof Error ? err.message : err));
@@ -142,13 +242,13 @@ export function AdvanceAcademyScreen() {
     let nextSkills: string[];
     if (isEquipped) {
       if (profile.equippedSkills.length <= 1) {
-        setMessage('Minimal 1 Jutsu harus tetap terpasang.');
+        setMessage('At least 1 Jutsu must remain equipped.');
         return;
       }
       nextSkills = profile.equippedSkills.filter((id) => id !== skillId);
     } else {
-      if (profile.equippedSkills.length >= 6) {
-        setMessage('Maksimal 6 Jutsu yang bisa dipasang di Battle Bar.');
+      if (profile.equippedSkills.length >= 8) {
+        setMessage('Maximum of 8 Jutsu can be equipped in the Battle Bar.');
         return;
       }
       nextSkills = [...profile.equippedSkills, skillId];
@@ -164,7 +264,7 @@ export function AdvanceAcademyScreen() {
         { sessionKey, charId: profile.charId }
       );
       await refreshProfile();
-      setMessage(`Loadout diperbarui (${nextSkills.length}/6 Jutsu terpasang).`);
+      setMessage(`Loadout updated (${nextSkills.length}/8 Jutsu equipped).`);
     } catch (err) {
       setMessage(String(err instanceof Error ? err.message : err));
     } finally {
@@ -186,10 +286,10 @@ export function AdvanceAcademyScreen() {
       );
       if (res.data?.status === 1) {
         const skName = skillsById[nextSkillId]?.name ?? nextSkillId;
-        setMessage(`Berhasil upgrade ke ${skName}!`);
+        setMessage(`Upgraded to ${skName}!`);
         await refreshProfile();
       } else {
-        setMessage(res.data?.result || res.data?.error || 'Upgrade gagal.');
+        setMessage(res.data?.result || res.data?.error || 'Upgrade failed.');
       }
     } catch (err) {
       setMessage(String(err));
@@ -198,470 +298,656 @@ export function AdvanceAcademyScreen() {
     }
   };
 
-  const selectedSkill = skillsById[selectedSkillId] ?? learnCatalog[0] ?? null;
-  const currentChains = chains[advElem] ?? {};
+  const activeLearnTabMeta = LEARN_TABS.find((t) => t.type === learnType);
 
   return (
     <NinjaScrollWindow
-      title="Academy"
+      title="Ninja Academy"
       bgSource={BUILDING_BGS.academy}
       onClose={() => {
         playClickSfx(serverUrl);
         navigate('hub');
       }}
-      headerCenter={
-        <View style={styles.modeRow}>
-          <Pressable
-            style={[styles.modeBtn, mode === 'learn' && styles.modeBtnActive]}
-            onPress={() => {
-              playClickSfx(serverUrl);
-              setMode('learn');
-            }}
-          >
-            <Text style={[styles.modeBtnText, mode === 'learn' && styles.modeBtnTextActive]}>
-              📜 Academy (Jutsu)
-            </Text>
-          </Pressable>
-          <Pressable
-            style={[styles.modeBtn, mode === 'advance' && styles.modeBtnActive]}
-            onPress={() => {
-              playClickSfx(serverUrl);
-              setMode('advance');
-            }}
-          >
-            <Text style={[styles.modeBtnText, mode === 'advance' && styles.modeBtnTextActive]}>
-              ⚡ Advance Academy
-            </Text>
-          </Pressable>
-        </View>
-      }
       rightContent={
         <View style={styles.currencyPill}>
-          <Text style={styles.currency}>
+          <Text style={styles.currencyTxt}>
             🪙 {(profile?.gold ?? 0).toLocaleString()} • 💎 {(profile?.tokens ?? 0).toLocaleString()}
           </Text>
         </View>
       }
     >
+      <View style={styles.hiddenBridge} pointerEvents="none">
+        <RuffleStageView ref={iconBridgeRef} baseUrl={serverUrl} onEvent={handleBridgeEvent} />
+      </View>
 
-      {message && (
-        <View style={styles.banner}>
-          <Text style={styles.bannerText}>{message}</Text>
+      <NinjaToast message={message} />
+
+      <View style={styles.container}>
+
+        {/* Top Bar: Academy / Advance Academy + Search */}
+        <View style={styles.topBarRow}>
+          <View style={styles.modeRow}>
+            <Pressable
+              style={[styles.mainTabBtn, mode === 'learn' && styles.mainTabBtnActive]}
+              onPress={() => {
+                playClickSfx(serverUrl);
+                setMode('learn');
+                setPage(1);
+                setSearch('');
+              }}
+            >
+              <Text style={[styles.mainTabTxt, mode === 'learn' && styles.mainTabTxtActive]}>
+                📜 Academy
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[styles.mainTabBtn, mode === 'advance' && styles.mainTabBtnActive]}
+              onPress={() => {
+                playClickSfx(serverUrl);
+                setMode('advance');
+                setSearch('');
+              }}
+            >
+              <Text style={[styles.mainTabTxt, mode === 'advance' && styles.mainTabTxtActive]}>
+                ⬆️ Advance Academy
+              </Text>
+            </Pressable>
+          </View>
+
+          <TextInput
+            style={styles.searchInput}
+            value={search}
+            onChangeText={(txt) => {
+              setSearch(txt);
+              setPage(1);
+            }}
+            placeholder="Search Jutsu..."
+            placeholderTextColor="#7A4C24"
+          />
         </View>
-      )}
 
-      {/* MODE 1: AUTHENTIC NINJA SAGA ACADEMY (LEARN & EQUIP ALL 250 BUYABLE JUTSUS) */}
-      {mode === 'learn' && (
-        <View style={styles.learnWrap}>
-          {/* Element Tabs */}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.elemScroll}
-            contentContainerStyle={styles.tabRow}
-          >
-            {LEARN_ELEMENT_TABS.map((el) => {
-              const active = learnType === el.type;
-              return (
+        {/* Sub-Filter Row: Learned Elements + Taijutsu/Genjutsu */}
+        <View style={styles.catRow}>
+          {mode === 'learn'
+            ? visibleLearnTabs.map((t) => (
                 <Pressable
-                  key={el.type}
-                  style={[
-                    styles.tabBtn,
-                    active && { backgroundColor: el.color, borderColor: '#FACC15', borderWidth: 1 },
-                  ]}
+                  key={t.type}
+                  style={[styles.catBtn, learnType === t.type && styles.catBtnActive]}
                   onPress={() => {
                     playClickSfx(serverUrl);
-                    setLearnType(el.type);
+                    setLearnType(t.type);
+                    setPage(1);
                   }}
                 >
-                  <Text style={styles.tabText}>
-                    {el.icon} {el.label}
+                  <Text style={[styles.catTxt, learnType === t.type && styles.catTxtActive]}>
+                    {t.icon} {t.label}
                   </Text>
                 </Pressable>
-              );
-            })}
-          </ScrollView>
+              ))
+            : visibleAdvanceTabs.map((t) => (
+                <Pressable
+                  key={t.key}
+                  style={[styles.catBtn, advElem === t.key && styles.catBtnActive]}
+                  onPress={() => {
+                    playClickSfx(serverUrl);
+                    setAdvElem(t.key);
+                  }}
+                >
+                  <Text style={[styles.catTxt, advElem === t.key && styles.catTxtActive]}>
+                    {t.icon} {t.label}
+                  </Text>
+                </Pressable>
+              ))}
+        </View>
 
-          {loading ? (
-            <ActivityIndicator color="#F59E0B" style={{ marginTop: 24 }} />
-          ) : (
-            <View style={styles.splitBody}>
-              {/* Left: Live 36 FPS Jutsu Animation Preview + Details + Action */}
-              <View style={styles.previewPane}>
-                <View style={styles.previewStageBox}>
-                  <RuffleStageView ref={stageRef} baseUrl={serverUrl} />
-                </View>
-
-                {selectedSkill && (
-                  <View style={styles.detailCard}>
-                    <View style={styles.detailTop}>
-                      <Text style={styles.detailName} numberOfLines={1}>
-                        {getSkillElementMeta(selectedSkill.type).icon} {selectedSkill.name}
-                      </Text>
-                      {isSkillAoE(selectedSkill) && (
-                        <View style={styles.aoeTag}>
-                          <Text style={styles.aoeTagText}>AoE</Text>
-                        </View>
-                      )}
-                    </View>
-                    <Text style={styles.detailStats}>
-                      Lv.{selectedSkill.level} • DMG {selectedSkill.damage} • CP {selectedSkill.cp_cost} • CD {selectedSkill.cooldown}t
-                    </Text>
-                    <Text style={styles.detailDesc} numberOfLines={3}>
-                      {selectedSkill.description || 'Ninjutsu Academy technique.'}
-                    </Text>
-
-                    <View style={styles.detailActions}>
-                      {ownedSet.has(selectedSkill.id) ? (
-                        <Pressable
-                          style={[
-                            styles.actionBtn,
-                            equippedSet.has(selectedSkill.id) ? styles.unequipBtn : styles.equipBtn,
-                          ]}
-                          disabled={busyId !== null}
-                          onPress={() => handleToggleEquip(selectedSkill.id)}
-                        >
-                          <Text style={styles.actionBtnText}>
-                            {busyId === `eq_${selectedSkill.id}`
-                              ? '...'
-                              : equippedSet.has(selectedSkill.id)
-                                ? '✓ Equipped (Tap to Unequip)'
-                                : '+ Equip to Battle Bar'}
-                          </Text>
-                        </Pressable>
-                      ) : (
-                        <Pressable
-                          style={[
-                            styles.actionBtn,
-                            styles.learnBtn,
-                            (profile?.level ?? 1) < selectedSkill.level && styles.btnLocked,
-                          ]}
-                          disabled={(profile?.level ?? 1) < selectedSkill.level || busyId !== null}
-                          onPress={() => handleLearnSkill(selectedSkill)}
-                        >
-                          <Text style={styles.actionBtnText}>
-                            {busyId === selectedSkill.id
-                              ? 'Learning...'
-                              : (profile?.level ?? 1) < selectedSkill.level
-                                ? `Requires Lv.${selectedSkill.level}`
-                                : selectedSkill.price_tokens > 0
-                                  ? `Learn (${selectedSkill.price_tokens} Tokens)`
-                                  : `Learn (${selectedSkill.price_gold.toLocaleString()} Gold)`}
-                          </Text>
-                        </Pressable>
-                      )}
-                    </View>
-                  </View>
-                )}
+        {/* Encyclopedia Split View */}
+        <View style={styles.splitBody}>
+          {/* Left List Pane */}
+          <View style={styles.leftCol}>
+            {loading ? (
+              <View style={styles.center}>
+                <ActivityIndicator color={NS_THEME.woodBorder} size="large" />
               </View>
+            ) : mode === 'learn' ? (
+              <>
+                <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.listWrap}>
+                  {pagedLearn.length === 0 ? (
+                    <Text style={styles.emptyTxt}>No Jutsu available in this category.</Text>
+                  ) : (
+                    pagedLearn.map((sk) => {
+                      const active = selectedLearnSkill?.id === sk.id;
+                      const owned = ownedSet.has(sk.id);
+                      const equipped = equippedSet.has(sk.id);
+                      return (
+                        <Pressable
+                          key={sk.id}
+                          style={[styles.tile, active && styles.tileActive]}
+                          onPress={() => {
+                            playClickSfx(serverUrl);
+                            setSelectedSkillId(sk.id);
+                          }}
+                        >
+                          <View style={styles.tileIconBox}>
+                            {iconUris[sk.id] ? (
+                              <Image
+                                source={{ uri: iconUris[sk.id] }}
+                                style={styles.tileIconImg}
+                                resizeMode="contain"
+                              />
+                            ) : (
+                              <Text style={styles.fallbackIcon}>📜</Text>
+                            )}
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.tileName} numberOfLines={1}>
+                              {sk.name}
+                            </Text>
+                            <Text style={styles.tileSub} numberOfLines={1}>
+                              Lv.{sk.level} • DMG {sk.damage} • {sk.cp_cost} CP
+                              {equipped ? ' • ★ EQUIPPED' : owned ? ' • ✓ OWNED' : ''}
+                            </Text>
+                          </View>
+                        </Pressable>
+                      );
+                    })
+                  )}
+                </ScrollView>
 
-              {/* Right: Scrollable Jutsu Grid for Selected Element */}
-              <View style={styles.catalogPane}>
-                <Text style={styles.catalogHeader}>
-                  {LEARN_ELEMENT_TABS.find((t) => t.type === learnType)?.label} Jutsu ({learnCatalog.length}) • Equipped {profile?.equippedSkills.length ?? 0}/6
-                </Text>
-                <ScrollView contentContainerStyle={styles.grid}>
-                  {learnCatalog.map((sk) => {
-                    const owned = ownedSet.has(sk.id);
-                    const equipped = equippedSet.has(sk.id);
-                    const selected = selectedSkill?.id === sk.id;
-                    const locked = (profile?.level ?? 1) < sk.level;
+                {totalPages > 1 ? (
+                  <View style={styles.pageBar}>
+                    <Pressable
+                      style={[styles.pageBtn, safePage <= 1 && styles.btnDisabled]}
+                      disabled={safePage <= 1}
+                      onPress={() => setPage((p) => Math.max(1, p - 1))}
+                    >
+                      <Text style={styles.pageBtnTxt}>◀ Prev</Text>
+                    </Pressable>
+                    <Text style={styles.pageInfo}>
+                      Page {safePage} / {totalPages}
+                    </Text>
+                    <Pressable
+                      style={[styles.pageBtn, safePage >= totalPages && styles.btnDisabled]}
+                      disabled={safePage >= totalPages}
+                      onPress={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    >
+                      <Text style={styles.pageBtnTxt}>Next ▶</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+              </>
+            ) : (
+              <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.listWrap}>
+                {currentChainEntries.length === 0 ? (
+                  <Text style={styles.emptyTxt}>No Advance Academy chains available.</Text>
+                ) : (
+                  currentChainEntries.map(([chainKey, skillIds]) => {
+                    const active = selectedChain?.[0] === chainKey;
+                    const firstId = skillIds[0];
+                    const ownedCount = skillIds.filter((id) => ownedSet.has(id)).length;
+                    const displayId =
+                      [...skillIds].reverse().find((id) => ownedSet.has(id)) ?? firstId;
+                    const displaySkill = skillsById[displayId];
                     return (
                       <Pressable
-                        key={sk.id}
-                        style={[
-                          styles.skillCard,
-                          owned && styles.skillCardOwned,
-                          selected && styles.skillCardSelected,
-                        ]}
+                        key={chainKey}
+                        style={[styles.tile, active && styles.tileActive]}
                         onPress={() => {
                           playClickSfx(serverUrl);
-                          setSelectedSkillId(sk.id);
+                          setSelectedChainKey(chainKey);
                         }}
                       >
-                        <View style={styles.cardTopRow}>
-                          <Text style={styles.cardName} numberOfLines={1}>
-                            {sk.name}
-                          </Text>
-                          {equipped ? (
-                            <Text style={styles.badgeEq}>★</Text>
-                          ) : owned ? (
-                            <Text style={styles.badgeOwn}>✓</Text>
-                          ) : null}
+                        <View style={styles.tileIconBox}>
+                          {iconUris[displayId] ? (
+                            <Image
+                              source={{ uri: iconUris[displayId] }}
+                              style={styles.tileIconImg}
+                              resizeMode="contain"
+                            />
+                          ) : (
+                            <Text style={styles.fallbackIcon}>⬆️</Text>
+                          )}
                         </View>
-                        <Text style={styles.cardMeta}>
-                          Lv.{sk.level} • DMG {sk.damage} • {sk.cp_cost} CP
-                        </Text>
-                        <Text
-                          style={[
-                            styles.cardPrice,
-                            owned && { color: '#15803D' },
-                            !owned && locked && { color: NS_THEME.inkSoft },
-                          ]}
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.tileName} numberOfLines={1}>
+                            {displaySkill?.name ?? chainKey}
+                          </Text>
+                          <Text style={styles.tileSub} numberOfLines={1}>
+                            Unlocked Tiers: {ownedCount} / {skillIds.length}
+                          </Text>
+                        </View>
+                      </Pressable>
+                    );
+                  })
+                )}
+              </ScrollView>
+            )}
+          </View>
+
+          {/* Right Detail Pane */}
+          <View style={styles.rightCol}>
+            {mode === 'learn' ? (
+              selectedLearnSkill ? (() => {
+                const owned = ownedSet.has(selectedLearnSkill.id);
+                const equipped = equippedSet.has(selectedLearnSkill.id);
+                const levelOk = (profile?.level ?? 1) >= selectedLearnSkill.level;
+                return (
+                  <View style={styles.detailCard}>
+                    <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 9, paddingBottom: 8 }}>
+                      <View style={styles.detailHeader}>
+                        <View style={styles.detailIconBig}>
+                          {iconUris[selectedLearnSkill.id] ? (
+                            <Image
+                              source={{ uri: iconUris[selectedLearnSkill.id] }}
+                              style={styles.detailIconImg}
+                              resizeMode="contain"
+                            />
+                          ) : (
+                            <Text style={{ fontSize: 24 }}>📜</Text>
+                          )}
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.detailTitle}>{selectedLearnSkill.name}</Text>
+                          <View
+                            style={[
+                              styles.typeBadge,
+                              { backgroundColor: activeLearnTabMeta?.color ?? '#B45309' },
+                            ]}
+                          >
+                            <Text style={styles.typeBadgeTxt}>
+                              {activeLearnTabMeta?.icon} {activeLearnTabMeta?.label} • Lv.
+                              {selectedLearnSkill.level}
+                            </Text>
+                          </View>
+                        </View>
+                        <Pressable
+                          style={styles.previewBtn}
+                          onPress={() => {
+                            playClickSfx(serverUrl);
+                            setPreviewSkill({
+                              id: selectedLearnSkill.id,
+                              name: selectedLearnSkill.name,
+                            });
+                          }}
                         >
-                          {equipped
-                            ? 'EQUIPPED'
-                            : owned
-                              ? 'OWNED'
-                              : sk.price_tokens > 0
-                                ? `${sk.price_tokens} Tokens`
-                                : `${sk.price_gold.toLocaleString()} Gold`}
+                          <Text style={styles.previewBtnTxt}>🎬 Preview</Text>
+                        </Pressable>
+                      </View>
+
+                      <View style={styles.statChips}>
+                        <Text style={styles.statChip}>⚔️ DMG: {selectedLearnSkill.damage}</Text>
+                        <Text style={styles.statChip}>💧 CP: {selectedLearnSkill.cp_cost}</Text>
+                        <Text style={styles.statChip}>⏱️ CD: {selectedLearnSkill.cooldown}t</Text>
+                        <Text style={styles.statChip}>
+                          🎯 {isSkillAoE(selectedLearnSkill) ? 'All Enemies' : 'Single'}
+                        </Text>
+                        {selectedLearnSkill.price_tokens > 0 ? (
+                          <Text style={styles.statChip}>
+                            💎 {selectedLearnSkill.price_tokens.toLocaleString()} Tokens
+                          </Text>
+                        ) : (
+                          <Text style={styles.statChip}>
+                            🪙 {selectedLearnSkill.price_gold.toLocaleString()} Gold
+                          </Text>
+                        )}
+                      </View>
+
+                      <View style={styles.descBox}>
+                        <Text style={styles.descHeading}>Description</Text>
+                        <Text style={styles.descBody}>
+                          {selectedLearnSkill.description || 'Authentic ninja jutsu.'}
+                        </Text>
+                      </View>
+                    </ScrollView>
+
+                    {owned ? (
+                      <Pressable
+                        style={[
+                          styles.actionBtn,
+                          equipped ? styles.btnRed : styles.btnGreen,
+                          busyId !== null && styles.btnDisabled,
+                        ]}
+                        disabled={busyId !== null}
+                        onPress={() => handleToggleEquip(selectedLearnSkill.id)}
+                      >
+                        <Text style={styles.actionBtnTxt}>
+                          {busyId === `eq_${selectedLearnSkill.id}`
+                            ? 'Updating...'
+                            : equipped
+                            ? 'Unequip from Battle Bar'
+                            : 'Equip to Battle Bar'}
                         </Text>
                       </Pressable>
+                    ) : (
+                      <Pressable
+                        style={[
+                          styles.actionBtn,
+                          styles.btnOrange,
+                          (!levelOk || busyId !== null) && styles.btnDisabled,
+                        ]}
+                        disabled={!levelOk || busyId !== null}
+                        onPress={() => handleLearnSkill(selectedLearnSkill)}
+                      >
+                        <Text style={styles.actionBtnTxt}>
+                          {busyId === selectedLearnSkill.id
+                            ? 'Learning...'
+                            : !levelOk
+                            ? `Requires Level ${selectedLearnSkill.level}`
+                            : selectedLearnSkill.price_tokens > 0
+                            ? `Learn Jutsu (${selectedLearnSkill.price_tokens} Tokens)`
+                            : `Learn Jutsu (${selectedLearnSkill.price_gold.toLocaleString()} Gold)`}
+                        </Text>
+                      </Pressable>
+                    )}
+                  </View>
+                );
+              })() : (
+                <View style={styles.center}>
+                  <Text style={styles.emptyTxt}>Select a Jutsu to inspect or learn.</Text>
+                </View>
+              )
+            ) : selectedChain ? (
+              <View style={styles.detailCard}>
+                <Text style={styles.detailTitle}>Upgrade Chain Tiers</Text>
+                <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+                  {selectedChain[1].map((sId, idx) => {
+                    const sk = skillsById[sId];
+                    const owned = ownedSet.has(sId);
+                    const prevOwned = idx === 0 || ownedSet.has(selectedChain[1][idx - 1]);
+                    const canUpgrade = !owned && prevOwned;
+                    return (
+                      <View
+                        key={sId}
+                        style={[
+                          styles.tierCard,
+                          owned && styles.tierCardOwned,
+                          canUpgrade && styles.tierCardNext,
+                        ]}
+                      >
+                        <View style={styles.tileIconBox}>
+                          {iconUris[sId] ? (
+                            <Image
+                              source={{ uri: iconUris[sId] }}
+                              style={styles.tileIconImg}
+                              resizeMode="contain"
+                            />
+                          ) : (
+                            <Text style={styles.fallbackIcon}>📜</Text>
+                          )}
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.tileName}>
+                            Tier {idx + 1}: {sk?.name ?? sId}
+                          </Text>
+                          <Text style={styles.tileSub}>
+                            Lv.{sk?.level ?? 1} • DMG {sk?.damage ?? 0} • {sk?.cp_cost ?? 0} CP
+                          </Text>
+                          <Text style={styles.tierDesc} numberOfLines={2}>
+                            {sk?.description || ''}
+                          </Text>
+                        </View>
+                        <View style={{ gap: 4, alignItems: 'flex-end' }}>
+                          <Pressable
+                            style={styles.miniPreviewBtn}
+                            onPress={() => {
+                              playClickSfx(serverUrl);
+                              setPreviewSkill({ id: sId, name: sk?.name ?? sId });
+                            }}
+                          >
+                            <Text style={styles.miniBtnTxt}>🎬</Text>
+                          </Pressable>
+                          {owned ? (
+                            <Text style={styles.ownedTag}>✓ OWNED</Text>
+                          ) : canUpgrade ? (
+                            <Pressable
+                              style={[styles.upgradeBtn, busyId !== null && styles.btnDisabled]}
+                              disabled={busyId !== null}
+                              onPress={() => handleUpgrade(sId)}
+                            >
+                              <Text style={styles.miniBtnTxt}>
+                                {busyId === sId ? '...' : 'Upgrade'}
+                              </Text>
+                            </Pressable>
+                          ) : (
+                            <Text style={styles.lockTag}>🔒</Text>
+                          )}
+                        </View>
+                      </View>
                     );
                   })}
                 </ScrollView>
               </View>
-            </View>
-          )}
-        </View>
-      )}
-
-      {/* MODE 2: ADVANCE ACADEMY (TIER 1-5 UPGRADE CHAINS) */}
-      {mode === 'advance' && (
-        <View style={styles.learnWrap}>
-          <View style={styles.tabRow}>
-            {ADVANCE_ELEM_TABS.map((el) => (
-              <Pressable
-                key={el}
-                style={[styles.tabBtn, advElem === el && styles.tabActive]}
-                onPress={() => {
-                  playClickSfx(serverUrl);
-                  setAdvElem(el);
-                }}
-              >
-                <Text style={styles.tabText}>{el.toUpperCase()}</Text>
-              </Pressable>
-            ))}
+            ) : (
+              <View style={styles.center}>
+                <Text style={styles.emptyTxt}>Select a chain to view upgrade tiers.</Text>
+              </View>
+            )}
           </View>
-
-          {loading ? (
-            <ActivityIndicator color="#F59E0B" style={{ marginTop: 24 }} />
-          ) : (
-            <ScrollView contentContainerStyle={styles.list}>
-              {Object.entries(currentChains).length === 0 ? (
-                <Text style={styles.emptyText}>Tidak ada chain upgrade untuk elemen {advElem}.</Text>
-              ) : (
-                Object.entries(currentChains).map(([chainName, skillIds]) => (
-                  <View key={chainName} style={styles.chainCard}>
-                    <Text style={styles.chainTitle}>
-                      {chainName.replace(/_/g, ' ').toUpperCase()}
-                    </Text>
-                    <ScrollView
-                      horizontal
-                      showsHorizontalScrollIndicator={false}
-                      contentContainerStyle={styles.tierRow}
-                    >
-                      {skillIds.map((sid, idx) => {
-                        const sk = skillsById[sid];
-                        const owned = ownedSet.has(sid);
-                        const prevOwned = idx === 0 || ownedSet.has(skillIds[idx - 1]);
-                        const canUpgrade = !owned && prevOwned;
-                        return (
-                          <View
-                            key={sid}
-                            style={[
-                              styles.tierBox,
-                              owned && styles.tierOwned,
-                              canUpgrade && styles.tierReady,
-                            ]}
-                          >
-                            <Text style={styles.tierName} numberOfLines={1}>
-                              T{idx + 1}: {sk?.name ?? sid}
-                            </Text>
-                            <Text style={styles.tierMeta}>
-                              Lv.{sk?.level ?? 1} • DMG {sk?.damage ?? 0} • CP {sk?.cp_cost ?? 0}
-                            </Text>
-                            <Text style={styles.tierCost}>
-                              {sk?.price_gold ? `${sk.price_gold.toLocaleString()}G` : ''}
-                              {sk?.price_tokens ? ` ${sk.price_tokens}T` : ''}
-                            </Text>
-                            {owned ? (
-                              <Text style={styles.ownedTag}>✓ OWNED</Text>
-                            ) : (
-                              <Pressable
-                                style={[styles.upBtn, !canUpgrade && styles.upBtnDisabled]}
-                                disabled={!canUpgrade || busyId !== null}
-                                onPress={() => handleUpgrade(sid)}
-                              >
-                                <Text style={styles.upBtnText}>
-                                  {busyId === sid ? '...' : canUpgrade ? 'Upgrade' : 'Locked'}
-                                </Text>
-                              </Pressable>
-                            )}
-                          </View>
-                        );
-                      })}
-                    </ScrollView>
-                  </View>
-                ))
-              )}
-            </ScrollView>
-          )}
         </View>
-      )}
+      </View>
+
+      <JutsuPreviewModal
+        visible={previewSkill !== null}
+        title={previewSkill?.name ?? 'Jutsu Preview'}
+        skillId={previewSkill?.id ?? null}
+        swfUrl={previewSkill ? buildSwfAssetUrl(serverUrl, 'skills', previewSkill.id) : null}
+        serverUrl={serverUrl}
+        onClose={() => setPreviewSkill(null)}
+      />
     </NinjaScrollWindow>
   );
 }
 
 const styles = StyleSheet.create({
-  modeRow: { flexDirection: 'row', gap: 5 },
-  modeBtn: {
-    backgroundColor: NS_THEME.tabInactive,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
-    borderWidth: 1.5,
-    borderColor: NS_THEME.woodBorder,
-  },
-  modeBtnActive: { backgroundColor: NS_THEME.tabActive, borderColor: NS_THEME.woodBorderDark },
-  modeBtnText: { color: NS_THEME.inkDark, fontSize: 10.5, fontWeight: '900' },
-  modeBtnTextActive: { color: '#FFF' },
+  hiddenBridge: { position: 'absolute', width: 1, height: 1, opacity: 0.01, left: -10, top: -10 },
   currencyPill: {
     backgroundColor: '#3E2008',
-    borderRadius: 8,
     borderWidth: 1.5,
     borderColor: NS_THEME.goldTrim,
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-  },
-  currency: { color: '#FDE047', fontSize: 10.5, fontWeight: '900' },
-  banner: {
-    backgroundColor: '#FEF3C7',
-    borderColor: '#B45309',
-    borderWidth: 1.5,
-    borderRadius: 7,
+    borderRadius: 12,
     paddingHorizontal: 10,
     paddingVertical: 4,
-    marginBottom: 5,
   },
-  bannerText: { color: '#78350F', fontSize: 11, fontWeight: '800' },
-  learnWrap: { flex: 1 },
-  elemScroll: { maxHeight: 34, marginBottom: 6 },
-  tabRow: { flexDirection: 'row', gap: 5, alignItems: 'center' },
-  tabBtn: {
+  currencyTxt: { color: '#FFE082', fontWeight: '800', fontSize: 11.5 },
+  container: { flex: 1, gap: 6 },
+  banner: {
+    backgroundColor: '#3E2008',
+    borderColor: NS_THEME.goldTrim,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+  },
+  bannerText: { color: '#FFE082', fontWeight: '800', fontSize: 12, textAlign: 'center' },
+  topBarRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  modeRow: { flexDirection: 'row', gap: 6, flex: 1.1 },
+  mainTabBtn: {
+    flex: 1,
+    paddingVertical: 6.5,
+    borderRadius: 8,
     backgroundColor: NS_THEME.tabInactive,
     borderWidth: 1.5,
     borderColor: NS_THEME.woodBorder,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  tabActive: { backgroundColor: NS_THEME.tabActive, borderColor: NS_THEME.woodBorderDark },
-  tabText: { color: '#FFF', fontSize: 10.5, fontWeight: '900' },
-  splitBody: { flex: 1, flexDirection: 'row', gap: 8 },
-  previewPane: {
-    width: '37%',
-    backgroundColor: NS_THEME.parchmentCard,
-    borderRadius: 10,
-    borderWidth: 1.5,
-    borderColor: NS_THEME.woodBorder,
-    padding: 7,
-    gap: 6,
-  },
-  previewStageBox: {
-    flex: 1,
-    backgroundColor: NS_THEME.stageDark,
-    borderRadius: 8,
-    borderWidth: 1.5,
-    borderColor: NS_THEME.woodBorder,
-    overflow: 'hidden',
-  },
-  detailCard: { gap: 3 },
-  detailTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 4 },
-  detailName: { color: NS_THEME.inkDark, fontSize: 12, fontWeight: '900', flex: 1 },
-  aoeTag: { backgroundColor: '#B45309', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 },
-  aoeTagText: { color: '#FFF', fontSize: 8, fontWeight: '900' },
-  detailStats: { color: '#9A3412', fontSize: 10, fontWeight: '900' },
-  detailDesc: { color: NS_THEME.inkMid, fontSize: 9.5, fontWeight: '600', lineHeight: 13 },
-  detailActions: { marginTop: 4 },
-  actionBtn: {
-    borderRadius: 7,
-    borderWidth: 1.5,
-    borderColor: NS_THEME.woodBorderDark,
-    paddingVertical: 7,
     alignItems: 'center',
   },
-  learnBtn: { backgroundColor: NS_THEME.btnOrange },
-  equipBtn: { backgroundColor: NS_THEME.btnGreen },
-  unequipBtn: { backgroundColor: NS_THEME.btnBlue },
-  btnLocked: { backgroundColor: NS_THEME.btnDisabled, opacity: 0.7 },
-  actionBtnText: { color: '#FFF', fontSize: 11, fontWeight: '900' },
-  catalogPane: {
+  mainTabBtnActive: { backgroundColor: NS_THEME.tabActive, borderColor: '#FFE082' },
+  mainTabTxt: { color: '#FFF4DC', fontWeight: '800', fontSize: 12 },
+  mainTabTxtActive: { color: '#FFFFFF', fontWeight: '900' },
+  searchInput: {
     flex: 1,
-    backgroundColor: NS_THEME.parchmentCardAlt,
-    borderRadius: 10,
+    maxWidth: 210,
+    backgroundColor: '#FFF7E0',
     borderWidth: 1.5,
     borderColor: NS_THEME.woodBorder,
-    padding: 7,
-  },
-  catalogHeader: { color: NS_THEME.inkDark, fontSize: 10.5, fontWeight: '900', marginBottom: 6 },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingBottom: 14 },
-  skillCard: {
-    width: '31.8%',
-    backgroundColor: NS_THEME.parchmentCard,
     borderRadius: 8,
-    borderWidth: 1.5,
-    borderColor: NS_THEME.woodBorder,
-    padding: 6,
-    gap: 2,
+    paddingHorizontal: 10,
+    paddingVertical: 4.5,
+    color: NS_THEME.inkDark,
+    fontSize: 11.5,
+    fontWeight: '700',
   },
-  skillCardOwned: { borderColor: NS_THEME.btnGreen, backgroundColor: '#E7F6E5' },
-  skillCardSelected: { borderColor: NS_THEME.btnOrange, borderWidth: 2, backgroundColor: NS_THEME.parchmentSelected },
-  cardBodyRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  skillIconBox: {
-    width: 30,
-    height: 30,
-    borderRadius: 5,
+  catRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 5 },
+  catBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 3.5,
+    borderRadius: 7,
+    backgroundColor: NS_THEME.parchmentCardAlt,
     borderWidth: 1.25,
     borderColor: NS_THEME.woodBorder,
-    backgroundColor: NS_THEME.stageDark,
-    overflow: 'hidden',
+  },
+  catBtnActive: { backgroundColor: '#D95B16', borderColor: '#FFE082' },
+  catTxt: { color: NS_THEME.inkDark, fontWeight: '800', fontSize: 10.5 },
+  catTxtActive: { color: '#FFFFFF' },
+  splitBody: { flex: 1, flexDirection: 'row', gap: 10 },
+  leftCol: { flex: 1.1, gap: 5 },
+  rightCol: { flex: 1.15 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  listWrap: { gap: 5, paddingBottom: 8 },
+  emptyTxt: { color: NS_THEME.inkSoft, fontSize: 12, fontStyle: 'italic', textAlign: 'center', marginTop: 14 },
+  tile: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: NS_THEME.parchmentCardAlt,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    borderRadius: 9,
+    padding: 6,
+  },
+  tileActive: {
+    backgroundColor: NS_THEME.parchmentSelected,
+    borderColor: '#D95B16',
+    borderWidth: 2,
+  },
+  tileIconBox: {
+    width: 38,
+    height: 38,
+    borderRadius: 8,
+    backgroundColor: '#231309',
+    borderWidth: 1.5,
+    borderColor: '#D9A438',
     alignItems: 'center',
     justifyContent: 'center',
+    overflow: 'hidden',
   },
-  skillIconImg: { width: '100%', height: '100%' },
-  cardTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 2 },
-  cardName: { color: NS_THEME.inkDark, fontSize: 10.5, fontWeight: '900', flex: 1 },
-  badgeEq: { color: '#D97706', fontSize: 11, fontWeight: '900' },
-  badgeOwn: { color: '#15803D', fontSize: 10, fontWeight: '900' },
-  cardMeta: { color: NS_THEME.inkSoft, fontSize: 8.5, fontWeight: '700' },
-  cardPrice: { color: '#B45309', fontSize: 9, fontWeight: '900', marginTop: 1 },
-  list: { gap: 8, paddingBottom: 16 },
-  emptyText: { color: NS_THEME.inkMid, fontSize: 12, fontWeight: '700', textAlign: 'center', marginTop: 24 },
-  chainCard: {
+  tileIconImg: { width: 34, height: 34 },
+  fallbackIcon: { fontSize: 16 },
+  tileName: { color: NS_THEME.inkDark, fontWeight: '900', fontSize: 12 },
+  tileSub: { color: NS_THEME.inkSoft, fontWeight: '700', fontSize: 9.5, marginTop: 1 },
+  pageBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     backgroundColor: NS_THEME.parchmentCard,
-    borderRadius: 10,
-    borderWidth: 1.5,
+    borderWidth: 1.25,
     borderColor: NS_THEME.woodBorder,
-    padding: 8,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
-  chainTitle: { color: NS_THEME.inkDark, fontSize: 11, fontWeight: '900', marginBottom: 6 },
-  tierRow: { gap: 8 },
-  tierBox: {
-    width: 155,
+  pageBtn: { backgroundColor: NS_THEME.btnOrange, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 3 },
+  pageBtnTxt: { color: '#FFFFFF', fontWeight: '900', fontSize: 10.5 },
+  pageInfo: { color: NS_THEME.inkDark, fontWeight: '800', fontSize: 11 },
+  detailCard: {
+    flex: 1,
+    backgroundColor: NS_THEME.parchmentCard,
+    borderWidth: 2,
+    borderColor: NS_THEME.woodBorder,
+    borderRadius: 11,
+    padding: 11,
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  detailHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  detailIconBig: {
+    width: 54,
+    height: 54,
+    borderRadius: 11,
+    backgroundColor: '#231309',
+    borderWidth: 2,
+    borderColor: '#FACC15',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  detailIconImg: { width: 48, height: 48 },
+  detailTitle: { color: NS_THEME.inkDark, fontWeight: '900', fontSize: 15 },
+  typeBadge: {
+    alignSelf: 'flex-start',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    marginTop: 3,
+  },
+  typeBadgeTxt: { color: '#FFFFFF', fontWeight: '800', fontSize: 10 },
+  previewBtn: {
+    backgroundColor: NS_THEME.btnBlue,
+    borderWidth: 1.5,
+    borderColor: '#FFE082',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  previewBtnTxt: { color: '#FFFFFF', fontWeight: '900', fontSize: 11 },
+  statChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 5 },
+  statChip: {
     backgroundColor: NS_THEME.parchmentCardAlt,
+    borderWidth: 1,
+    borderColor: NS_THEME.woodBorder,
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 2.5,
+    color: NS_THEME.inkDark,
+    fontWeight: '800',
+    fontSize: 10.5,
+  },
+  descBox: {
+    backgroundColor: '#FFF7E0',
+    borderWidth: 1.25,
+    borderColor: '#D9A438',
+    borderRadius: 8,
+    padding: 9,
+    gap: 3,
+  },
+  descHeading: { color: '#92400E', fontWeight: '900', fontSize: 10.5 },
+  descBody: { color: NS_THEME.inkDark, fontSize: 12, lineHeight: 17, fontWeight: '600' },
+  actionBtn: {
+    paddingVertical: 9,
     borderRadius: 8,
     borderWidth: 1.5,
-    borderColor: NS_THEME.woodBorder,
-    padding: 7,
-    justifyContent: 'space-between',
-  },
-  tierOwned: { borderColor: NS_THEME.btnGreen, backgroundColor: '#E7F6E5' },
-  tierReady: { borderColor: NS_THEME.btnOrange },
-  tierName: { color: NS_THEME.inkDark, fontSize: 11, fontWeight: '900' },
-  tierMeta: { color: NS_THEME.inkSoft, fontSize: 9, fontWeight: '700', marginTop: 2 },
-  tierCost: { color: '#B45309', fontSize: 9, fontWeight: '800', marginTop: 2 },
-  ownedTag: { color: '#15803D', fontSize: 10, fontWeight: '900', marginTop: 6, textAlign: 'center' },
-  upBtn: {
-    backgroundColor: NS_THEME.btnOrange,
-    borderWidth: 1.5,
-    borderColor: NS_THEME.woodBorderDark,
-    borderRadius: 5,
-    paddingVertical: 4,
-    marginTop: 6,
+    borderColor: '#3E2008',
     alignItems: 'center',
   },
-  upBtnDisabled: { backgroundColor: NS_THEME.btnDisabled, opacity: 0.6 },
-  upBtnText: { color: '#FFF', fontSize: 10, fontWeight: '900' },
+  actionBtnTxt: { color: '#FFFFFF', fontWeight: '900', fontSize: 12.5 },
+  btnOrange: { backgroundColor: NS_THEME.btnOrange },
+  btnGreen: { backgroundColor: NS_THEME.btnGreen },
+  btnRed: { backgroundColor: NS_THEME.btnRed },
+  btnDisabled: { opacity: 0.45 },
+  tierCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: NS_THEME.parchmentCardAlt,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorder,
+    borderRadius: 9,
+    padding: 7,
+  },
+  tierCardOwned: { backgroundColor: '#E5F2D9', borderColor: '#2E8534' },
+  tierCardNext: { backgroundColor: NS_THEME.parchmentSelected, borderColor: '#D95B16' },
+  tierDesc: { color: NS_THEME.inkMid, fontSize: 10, marginTop: 2 },
+  miniPreviewBtn: {
+    backgroundColor: NS_THEME.btnBlue,
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  upgradeBtn: {
+    backgroundColor: NS_THEME.btnOrange,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  miniBtnTxt: { color: '#FFFFFF', fontWeight: '900', fontSize: 10 },
+  ownedTag: { color: '#15803D', fontWeight: '900', fontSize: 9.5 },
+  lockTag: { fontSize: 12 },
 });

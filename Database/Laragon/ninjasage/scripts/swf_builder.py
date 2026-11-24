@@ -13,6 +13,7 @@ Implements Ninja Horizon's Single-Ruffle-Instance 36 FPS Battle Engine:
 import os
 import sys
 import json
+import math
 import struct
 import zlib
 import lzma
@@ -26,9 +27,10 @@ PLAYER_TY = 255.0
 ENEMY_TX = 630.0
 ENEMY_TY = 255.0
 PLAYER_MELEE_TX = 572.0  # Right in front of Enemy (630) so 0.25-scale melee slashes connect
-ENEMY_MELEE_TX = 278.0   # Right in front of Player (220) so 0.25-scale enemy slashes connect
+ENEMY_MELEE_TX = 288.0   # Right in front of Player (220), pulled back 10px so slashes connect cleanly
 CHAR_SCALE = 0.25
 FPS_36_FIXED = 36 * 256  # 36.0 FPS like Ninja Horizon's fps36
+FPS_60_FIXED = 60 * 256  # 60.0 FPS battle testing mode
 
 PLAYER_PART_SLOTS = {
     "back": (508, 1),
@@ -287,6 +289,104 @@ def parse_place3_info(body: bytes):
     return fl1, fl2, depth, cid, name, cid_offset
 
 
+def optimize_place3_for_mobile_gpu(body: bytes) -> bytes:
+    """
+    Strips GPU-heavy offscreen FBO SurfaceFilterList (Blur/Glow/DropShadow/Bevel/etc., fl2 & 0x01)
+    and animated CacheAsBitmap (fl2 & 0x04) from PlaceObject3 tags while preserving BlendMode (Add/Screen),
+    ColorTransform, Matrix, ClipDepth, Visible, and ClipActions intact.
+    Eliminates multi-pass FBO shader stalls in Ruffle WebGL on mobile across all 1,160+ jutsu SWFs!
+    """
+    if len(body) < 4:
+        return body
+    fl1, fl2 = body[0], body[1]
+    if (fl2 & 0x05) == 0:
+        return body
+    try:
+        n = len(body)
+        p = 4
+        if fl2 & 0x08:
+            end = body.find(b"\x00", p)
+            if end == -1:
+                return body
+            p = end + 1
+        if fl1 & 0x02:
+            p += 2
+        if fl1 & 0x04:
+            p = skip_matrix(body, p)
+        if fl1 & 0x08:
+            p = skip_cxform(body, p)
+        if fl1 & 0x10:
+            p += 2
+        if fl1 & 0x20:
+            end = body.find(b"\x00", p)
+            if end == -1:
+                return body
+            p = end + 1
+        if fl1 & 0x40:
+            p += 2
+        if p > n:
+            return body
+
+        out = bytearray(body[:p])
+        out[1] = fl2 & ~0x05  # clear HasFilterList (0x01) & HasCacheAsBitmap (0x04)
+
+        # Skip SurfaceFilterList if present
+        if fl2 & 0x01:
+            if p >= n:
+                return body
+            num_filters = body[p]
+            p += 1
+            for _ in range(num_filters):
+                if p >= n:
+                    return body
+                fid = body[p]
+                p += 1
+                if fid == 0:      # DropShadowFilter
+                    p += 23
+                elif fid == 1:    # BlurFilter
+                    p += 9
+                elif fid == 2:    # GlowFilter
+                    p += 15
+                elif fid == 3:    # BevelFilter
+                    p += 27
+                elif fid in (4, 7):  # GradientGlowFilter / GradientBevelFilter
+                    if p >= n:
+                        return body
+                    num_colors = body[p]
+                    p += 1 + num_colors * 5 + 19
+                elif fid == 5:    # ConvolutionFilter
+                    if p + 2 > n:
+                        return body
+                    mx, my = body[p], body[p + 1]
+                    p += 2 + 4 + 4 + mx * my * 4 + 4 + 1
+                elif fid == 6:    # ColorMatrixFilter
+                    p += 80
+                else:
+                    return body
+                if p > n:
+                    return body
+
+        # Preserve BlendMode (1 byte) so Add/Screen elemental glows stay vibrant at 0 FBO cost!
+        if fl2 & 0x02:
+            if p >= n:
+                return body
+            out.append(body[p])
+            p += 1
+
+        # Skip BitmapCache (1 byte) if present
+        if fl2 & 0x04:
+            if p >= n:
+                return body
+            p += 1
+
+        # Preserve remaining fields (Visible, BackgroundColor, ClipActions)
+        if p <= n:
+            out.extend(body[p:])
+        return bytes(out)
+    except Exception:
+        return body
+
+
 def avm1_goto_and_play(frame_1_indexed: int) -> bytes:
     f0 = max(0, frame_1_indexed - 1)
     return b"\x81\x02\x00" + struct.pack("<H", f0) + b"\x06\x00"
@@ -311,6 +411,17 @@ def avm1_clip_goto_stop_raw(target_name: str, frame_1_indexed: int) -> bytes:
     )
 
 
+def avm1_clip_goto_play_raw(target_name: str, frame_1_indexed: int) -> bytes:
+    """Returns raw AVM1 opcodes (no trailing 0x00) to tellTarget(target_name).gotoAndPlay(frame)."""
+    f0 = max(0, frame_1_indexed - 1)
+    return (
+        avm1_set_target_raw(target_name)
+        + b"\x81\x02\x00" + struct.pack("<H", f0)
+        + b"\x06"  # ActionPlay
+        + avm1_set_target_raw("")
+    )
+
+
 def avm1_clip_set_pos_raw(target_name: str, x_px: float, y_px: float) -> bytes:
     """Returns raw AVM1 opcodes (no trailing 0x00) to set target._x and target._y via ActionSetProperty."""
     xi = int(round(x_px))
@@ -323,23 +434,53 @@ def avm1_clip_set_pos_raw(target_name: str, x_px: float, y_px: float) -> bytes:
 
 def build_enemy_slot_wrapper(wrapper_sid: int, standby_cid: int, atk_cid: int, hit_cid: int, dead_cid: int) -> bytes:
     """
-    4-frame MovieClip wrapper for an enemy slot:
-      Frame 1 = standby, Frame 2 = attack, Frame 3 = hit, Frame 4 = dead.
-    Controlled purely via AVM1 SetTarget+GotoFrame so Root timeline jumps NEVER mutate other enemies!
+    9-frame MovieClip wrapper for an enemy/ally slot with forward-stepped state transitions
+    so Ruffle AVM1 ALWAYS executes Frame 1 DoAction on hit, standby, and dead sprites:
+      Frame 1 = standby (initial boot, stop)
+      Frame 2 = attack (stop)
+      Frame 3 = reset_hit (empty -> advances forward to Frame 4)
+      Frame 4 = hit (stop)
+      Frame 5 = hidden (empty, stop)
+      Frame 6 = reset_standby (empty -> advances forward to Frame 7)
+      Frame 7 = fresh standby (stop)
+      Frame 8 = reset_dead (empty -> advances forward to Frame 9)
+      Frame 9 = fresh dead (stop)
     """
     chunks = []
-    for cid in (standby_cid, atk_cid, hit_cid, dead_cid):
-        chunks.append(encode_tag(28, struct.pack("<H", 1)))
-        chunks.append(encode_place_object2(1, cid, 0.0, 0.0, 1.0, 1.0, move=False))
-        chunks.append(encode_tag(12, avm1_stop()))
-        chunks.append(encode_tag(1, b""))
-    # Frame 5 = hidden (empty). Used while a temporary "actor" clip performs the enemy dash/attack,
-    # so the persistent wrapper itself is NEVER moved and can never be left out of its slot.
+    # Frame 1: standby
+    chunks.append(encode_tag(28, struct.pack("<H", 1)))
+    chunks.append(encode_place_object2(1, standby_cid, 0.0, 0.0, 1.0, 1.0, move=False))
+    chunks.append(encode_tag(12, avm1_stop()))
+    chunks.append(encode_tag(1, b""))
+    # Frame 2: attack
+    chunks.append(encode_tag(28, struct.pack("<H", 1)))
+    chunks.append(encode_place_object2(1, atk_cid, 0.0, 0.0, 1.0, 1.0, move=False))
+    chunks.append(encode_tag(12, avm1_stop()))
+    chunks.append(encode_tag(1, b""))
+    # Frame 3 -> Frame 4: forward-stepped hit
+    chunks.append(encode_tag(28, struct.pack("<H", 1)))
+    chunks.append(encode_tag(1, b""))
+    chunks.append(encode_place_object2(1, hit_cid, 0.0, 0.0, 1.0, 1.0, move=False))
+    chunks.append(encode_tag(12, avm1_stop()))
+    chunks.append(encode_tag(1, b""))
+    # Frame 5: hidden (empty, stopped)
     chunks.append(encode_tag(28, struct.pack("<H", 1)))
     chunks.append(encode_tag(12, avm1_stop()))
     chunks.append(encode_tag(1, b""))
+    # Frame 6 -> Frame 7: forward-stepped standby
+    chunks.append(encode_tag(28, struct.pack("<H", 1)))
+    chunks.append(encode_tag(1, b""))
+    chunks.append(encode_place_object2(1, standby_cid, 0.0, 0.0, 1.0, 1.0, move=False))
+    chunks.append(encode_tag(12, avm1_stop()))
+    chunks.append(encode_tag(1, b""))
+    # Frame 8 -> Frame 9: forward-stepped dead
+    chunks.append(encode_tag(28, struct.pack("<H", 1)))
+    chunks.append(encode_tag(1, b""))
+    chunks.append(encode_place_object2(1, dead_cid, 0.0, 0.0, 1.0, 1.0, move=False))
+    chunks.append(encode_tag(12, avm1_stop()))
+    chunks.append(encode_tag(1, b""))
     chunks.append(encode_tag(0, b""))
-    return struct.pack("<HH", wrapper_sid, 5) + b"".join(chunks)
+    return struct.pack("<HH", wrapper_sid, 9) + b"".join(chunks)
 
 
 def avm1_push_items(items) -> bytes:
@@ -432,6 +573,7 @@ def build_variant_sprite(
     anim: str,
     loop_self: bool = False,
     max_frame_cutoff: int = 0,
+    strip_cids: set = None,
 ):
     _, sp_fc, sub_tags, segments = parse_sprite_segments(sprite_body)
     sb_start, sb_end = segments.get("standby", (1, sp_fc))
@@ -457,6 +599,14 @@ def build_variant_sprite(
     for sc, sb in sub_tags:
         if sc in (0, 12, 14, 15, 18, 19, 45):
             continue
+        if strip_cids and sc == 26:
+            _, _, r_cid, _ = parse_place2_info(sb)
+            if r_cid in strip_cids:
+                continue
+        elif strip_cids and sc == 70:
+            _, _, _, r_cid, _, _ = parse_place3_info(sb)
+            if r_cid in strip_cids:
+                continue
         if sc == 1:
             if cur_f in frame_actions:
                 out_chunks.append(encode_tag(12, frame_actions[cur_f]))
@@ -532,7 +682,7 @@ def inject_sprite_controller(sprite_body: bytes, anim: str, is_skill: bool = Fal
     return struct.pack("<HH", sp_id, sp_fc) + b"".join(out_chunks)
 
 
-def cmd_build_entity(input_path: str, output_path: str, anim: str):
+def cmd_build_entity(input_path: str, output_path: str, anim: str, preview: bool = False):
     data = decompress_swf(input_path)
     version, _, _, tag_start = parse_header(data)
     tags = parse_tags(data, tag_start)
@@ -582,11 +732,95 @@ def cmd_build_entity(input_path: str, output_path: str, anim: str):
         out_tags.append(encode_tag(c, b))
 
     if main_sid is not None:
-        out_tags.append(encode_place_object2(1, main_sid, ENEMY_TX, ENEMY_TY, CHAR_SCALE, CHAR_SCALE))
+        if preview:
+            # Auto-fit pet frame-1 bounds into 340x280, centered, facing right (negative X scale)
+            shapes_map = {}
+            sprites_map = {}
+            for tc, tb in tags:
+                if tc in (2, 22, 32, 83) and len(tb) >= 4:
+                    shapes_map[struct.unpack("<H", tb[:2])[0]] = parse_rect_px(tb, 2)[:4]
+                elif tc == 39 and len(tb) >= 4:
+                    sprites_map[struct.unpack("<H", tb[:2])[0]] = tb
+
+            def _parse_mat(buf: bytes, pos: int):
+                bp = pos * 8
+                def _rb(n: int) -> int:
+                    nonlocal bp
+                    v = 0
+                    for _ in range(n):
+                        v = (v << 1) | ((buf[bp >> 3] >> (7 - (bp & 7))) & 1)
+                        bp += 1
+                    return v
+                def _rsb(n: int) -> int:
+                    v = _rb(n)
+                    if n > 0 and (v & (1 << (n - 1))):
+                        v -= (1 << n)
+                    return v
+                sx, sy, r0, r1 = 1.0, 1.0, 0.0, 0.0
+                if _rb(1):
+                    nb = _rb(5)
+                    sx = _rsb(nb) / 65536.0
+                    sy = _rsb(nb) / 65536.0
+                if _rb(1):
+                    nb = _rb(5)
+                    r0 = _rsb(nb) / 65536.0
+                    r1 = _rsb(nb) / 65536.0
+                nb = _rb(5)
+                tx = _rsb(nb) / 20.0
+                ty = _rsb(nb) / 20.0
+                return sx, sy, r0, r1, tx, ty
+
+            def _first_bounds(cid: int, vis=None):
+                if vis is None:
+                    vis = set()
+                if cid in vis:
+                    return None
+                vis.add(cid)
+                if cid in shapes_map:
+                    return shapes_map[cid]
+                if cid not in sprites_map:
+                    return None
+                xs, ys = [], []
+                for sc, sbody in parse_tags(sprites_map[cid], 4):
+                    if sc == 1:
+                        break
+                    if sc == 26 and (sbody[0] & 0x02):
+                        ccid = struct.unpack("<H", sbody[3:5])[0]
+                        mat = _parse_mat(sbody, 5) if (sbody[0] & 0x04) else (1.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+                        r = _first_bounds(ccid, vis.copy())
+                    elif sc == 70 and (sbody[0] & 0x02):
+                        ccid = struct.unpack("<H", sbody[4:6])[0]
+                        mat = _parse_mat(sbody, 6) if (sbody[0] & 0x04) else (1.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+                        r = _first_bounds(ccid, vis.copy())
+                    else:
+                        continue
+                    if r:
+                        msx, msy, mr0, mr1, mtx, mty = mat
+                        for bx in (r[0], r[1]):
+                            for by in (r[2], r[3]):
+                                xs.append(bx * msx + by * mr1 + mtx)
+                                ys.append(bx * mr0 + by * msy + mty)
+                return (min(xs), max(xs), min(ys), max(ys)) if xs else None
+
+            pb = _first_bounds(main_sid)
+            if pb and (pb[1] - pb[0]) > 5.0 and (pb[3] - pb[2]) > 5.0:
+                bw = pb[1] - pb[0]
+                bh = pb[3] - pb[2]
+                sc_fit = min(250.0 / bw, 215.0 / bh)
+                sc_fit = max(0.55, min(1.55, sc_fit))
+                cx = (pb[0] + pb[1]) / 2.0
+                cy = (pb[2] + pb[3]) / 2.0
+                ptx = 170.0 + sc_fit * cx
+                pty = 144.0 - sc_fit * cy
+                out_tags.append(encode_place_object2(1, main_sid, ptx, pty, -sc_fit, sc_fit))
+            else:
+                out_tags.append(encode_place_object2(1, main_sid, 155.0, 248.0, -0.78, 0.78))
+        else:
+            out_tags.append(encode_place_object2(1, main_sid, ENEMY_TX, ENEMY_TY, CHAR_SCALE, CHAR_SCALE))
     out_tags.append(encode_tag(1, b""))
     out_tags.append(encode_tag(0, b""))
 
-    rect = encode_rect(0, ARENA_W, 0, ARENA_H)
+    rect = encode_rect(0, 340, 0, 280) if preview else encode_rect(0, ARENA_W, 0, ARENA_H)
     swf_bytes = build_swf(version, rect, FPS_36_FIXED, 1, b"".join(out_tags))
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "wb") as f:
@@ -788,10 +1022,44 @@ def load_dressed_skill_defs(skill_swf_path: str, id_offset: int, parts_by_name: 
     out_defs = []
     skill_fc = sprites[main_sid][0] if main_sid in sprites else 45
 
+    # Identify unused 'icon' sprite IDs so we don't bloat battle SWFs with unreachable icon assets
+    icon_root_cids = {cid for _, cid, nm in root_candidates if nm == "icon" and cid != main_sid}
+    reachable_cids = set()
+    if main_sid is not None:
+        defs_by_id = {}
+        for c, b in tags:
+            if c in DEFINITION_TAGS and c not in (14,) and len(b) >= 2:
+                defs_by_id[struct.unpack("<H", b[:2])[0]] = (c, b)
+        queue = [main_sid]
+        while queue:
+            cur_id = queue.pop()
+            if cur_id in reachable_cids or cur_id not in defs_by_id:
+                continue
+            reachable_cids.add(cur_id)
+            dc, db = defs_by_id[cur_id]
+            if dc == 39:
+                for sc, sb_b in parse_tags(db, 4):
+                    if sc == 26 and (sb_b[0] & 0x02):
+                        rc = struct.unpack("<H", sb_b[3:5])[0]
+                        if rc not in reachable_cids:
+                            queue.append(rc)
+                    elif sc == 70:
+                        _, _, _, rc, _, _ = parse_place3_info(sb_b)
+                        if rc is not None and rc not in reachable_cids:
+                            queue.append(rc)
+            elif dc in (2, 22, 32, 83):
+                for bmp_id in extract_shape_bitmap_ids(dc, db):
+                    if bmp_id not in reachable_cids:
+                        queue.append(bmp_id)
+
     for c, b in tags:
         if c not in DEFINITION_TAGS or c in (14,):
             continue
         old_id = struct.unpack("<H", b[:2])[0]
+        if old_id in icon_root_cids:
+            continue
+        if reachable_cids and old_id not in reachable_cids:
+            continue
         new_id = old_id + id_offset
         if c == 39:
             sfc = struct.unpack("<H", b[2:4])[0]
@@ -814,6 +1082,7 @@ def load_dressed_skill_defs(skill_swf_path: str, id_offset: int, parts_by_name: 
                                 replaced = True
                         if not replaced:
                             sb = sb[:cpos] + struct.pack("<H", ref_cid + id_offset) + sb[cpos + 2 :]
+                    sb = optimize_place3_for_mobile_gpu(sb)
                 elif sc == 26 and (sb[0] & 0x02):
                     _, dp, ref_cid, snm = parse_place2_info(sb)
                     if part_name == "weapon" and snm != "holderMc" and "weapon" in parts_by_name:
@@ -900,13 +1169,20 @@ def cmd_build_skill_icons(skills_dir: str, skills_csv: str, output_path: str):
     if not skill_ids:
         skill_ids = ["skill_01"]
 
-    CELL = 64
+    CELL = 128
     out_tags = [encode_tag(69, b"\x20\x00\x00\x00")]
     placed = []
 
     for idx, raw_id in enumerate(skill_ids):
         sk_id = raw_id.replace(".swf", "")
         sk_path = os.path.join(skills_dir, f"{sk_id}.swf")
+        if not os.path.isfile(sk_path):
+            parent_dir = os.path.dirname(os.path.abspath(skills_dir))
+            for sib in ("materials", "essentials", "items", "consumables", "pets", "skills"):
+                cand = os.path.join(parent_dir, sib, f"{sk_id}.swf")
+                if os.path.isfile(cand):
+                    sk_path = cand
+                    break
         if not os.path.isfile(sk_path):
             fallback = os.path.join(skills_dir, "skill_01.swf")
             if os.path.isfile(fallback):
@@ -927,6 +1203,12 @@ def cmd_build_skill_icons(skills_dir: str, skills_csv: str, output_path: str):
                     defs_by_id[cid] = (c, b)
                 elif c == 26:
                     _, _, cid, nm = parse_place2_info(b)
+                    if nm == "icon" and cid is not None:
+                        icon_cid = cid
+                    elif nm in ("pet_head", "upper_body", "weapon", "back_item", "hair") and cid is not None and fallback_cid is None:
+                        fallback_cid = cid
+                elif c == 70:
+                    _, _, _, cid, nm, _ = parse_place3_info(b)
                     if nm == "icon" and cid is not None:
                         icon_cid = cid
                     elif nm in ("pet_head", "upper_body", "weapon", "back_item", "hair") and cid is not None and fallback_cid is None:
@@ -954,12 +1236,16 @@ def cmd_build_skill_icons(skills_dir: str, skills_csv: str, output_path: str):
                             _, _, _, ref_cid, _, _ = parse_place3_info(sb_b)
                             if ref_cid is not None:
                                 queue.append(ref_cid)
+                elif dc in (2, 22, 32, 83):
+                    # Also collect any BitmapId referenced by FillStyleArray in DefineShape/2/3/4!
+                    for bmp_id in extract_shape_bitmap_ids(dc, db):
+                        queue.append(bmp_id)
 
             id_offset = 1000 + idx * 500
             for cid in sorted(needed):
                 dc, db = defs_by_id[cid]
                 new_id = cid + id_offset
-                if dc in (2, 22, 32):
+                if dc in (2, 22, 32, 83):
                     out_tags.append(encode_tag(dc, remap_shape_bitmap_ids(dc, db, id_offset)))
                 elif dc == 39:
                     sfc = struct.unpack("<H", db[2:4])[0]
@@ -979,13 +1265,19 @@ def cmd_build_skill_icons(skills_dir: str, skills_csv: str, output_path: str):
                 else:
                     out_tags.append(encode_tag(dc, struct.pack("<H", new_id) + db[2:]))
 
-            # Fill the entire 64x64 cell edge-to-edge with the 50x50 icon (scale 1.28)
-            placed.append((idx + 1, icon_cid + id_offset, idx * CELL, 0.0))
+            # Skills SWFs ALWAYS use 50x50 top-left icons (x[0..50], y[0..50]);
+            # Items/materials/consumables/essentials/pets ALWAYS use 100x100 bottom-centered icons (x[-50..50], y[-100..0]).
+            actual_dir = os.path.basename(os.path.dirname(os.path.abspath(sk_path)))
+            if actual_dir != "skills":
+                placed.append((idx + 1, icon_cid + id_offset, idx * CELL + (CELL / 2.0), float(CELL), CELL / 100.0))
+            else:
+                # Fill the entire 128x128 HD cell edge-to-edge with the 50x50 vector icon (scale 2.56)
+                placed.append((idx + 1, icon_cid + id_offset, idx * CELL, 0.0, CELL / 50.0))
         except Exception:
             continue
 
-    for dp, cid, tx, ty in placed:
-        out_tags.append(encode_place_object2(dp, cid, tx, ty, 1.28, 1.28))
+    for dp, cid, tx, ty, sc in placed:
+        out_tags.append(encode_place_object2(dp, cid, tx, ty, sc, sc))
 
     out_tags.append(encode_tag(1, b""))
     out_tags.append(encode_tag(0, b""))
@@ -1010,7 +1302,8 @@ def cmd_extract_player_base(ninjasage_swf_path: str, output_base_path: str):
             if c == 39 and cid in (531, 532):
                 b = struct.pack("<HH", cid, 1) + encode_tag(1, b"") + encode_tag(0, b"")
             elif c == 39 and cid == 698:
-                # Truncate Sprite #698 at Frame 398 (drops 514 unused seasonal emote frames!)
+                # Truncate Sprite #698 at Frame 427 (includes complete authentic 30-frame 'item' scroll animation 398..427,
+                # while still dropping 484 unused seasonal emote frames!)
                 sub_chunks = []
                 cf = 1
                 for sc, sb in parse_tags(b, 4):
@@ -1018,11 +1311,11 @@ def cmd_extract_player_base(ninjasage_swf_path: str, output_base_path: str):
                         continue
                     sub_chunks.append(encode_tag(sc, sb))
                     if sc == 1:
-                        if cf >= 398:
+                        if cf >= 427:
                             break
                         cf += 1
                 sub_chunks.append(encode_tag(0, b""))
-                b = struct.pack("<HH", 698, min(cf, 398)) + b"".join(sub_chunks)
+                b = struct.pack("<HH", 698, min(cf, 427)) + b"".join(sub_chunks)
             defs_in_order.append((cid, c, b))
             defs_by_id[cid] = (c, b)
 
@@ -1109,8 +1402,9 @@ def cmd_build_player(
 
     if bg_swf_path == "__portrait__":
         # Authentic Ninja Saga head portrait: Sprite 521 (face + hair + hair_color, 1 frame)
-        # Raised 50px (ty=107) so head & hair sit dead-center inside the 160x160 portrait frame
-        out_tags.append(encode_place_object2(1, 521, 75.0, 107.0, -1.25, 1.25))
+        # Local bounds of Sprite 521 are ~x=[-23.2, 22.6], y=[-26.5, 26.0] (center ~(-0.3, -0.3)).
+        # Scale 2.95x centered at (78, 82) fills ~90% of the 160x160 portrait frame cleanly.
+        out_tags.append(encode_place_object2(1, 521, 78.0, 82.0, -2.95, 2.95))
         rect = encode_rect(0, 160, 0, 160)
     elif bg_swf_path and os.path.isfile(bg_swf_path):
         bg_def_tags, bg_cid, bg_w, bg_h = load_mission_bg_defs(bg_swf_path, id_offset=45000)
@@ -1124,9 +1418,10 @@ def cmd_build_player(
         out_tags.append(encode_place_object2(2, 698, 200.0, 342.0, -0.42, 0.42))
         rect = encode_rect(0, ARENA_W, 0, ARENA_H)
     else:
-        # Centered zoomed-in character preview (for Create New Ninja & Shop Fitting Room)
-        out_tags.append(encode_place_object2(1, 698, 220.0, 290.0, -0.62, 0.62))
-        rect = encode_rect(0, 440, 0, 360)
+        # Centered large full-body character preview (for Profile, Gear, Create Ninja & Shop Fitting Room)
+        # Shifted 70px left (tx=90) so the character sits cleanly centered in the stage frame
+        out_tags.append(encode_place_object2(1, 698, 90.0, 264.0, -0.95, 0.95))
+        rect = encode_rect(0, 320, 0, 300)
 
     out_tags.append(encode_tag(1, b""))
     out_tags.append(encode_tag(0, b""))
@@ -1160,8 +1455,54 @@ def parse_rect_px(buf: bytes, pos: int):
     return xmin, xmax, ymin, ymax, (bit_pos + 7) // 8
 
 
+def extract_shape_bitmap_ids(tag_code: int, body: bytes):
+    """Returns all BitmapId values referenced in a DefineShape/2/3/4 FillStyleArray."""
+    ids = []
+    if len(body) < 4:
+        return ids
+    try:
+        _, _, _, _, pos = parse_rect_px(body, 2)
+        if tag_code == 83:
+            # DefineShape4 has EdgeBounds (RECT) + 1 byte flags before FillStyleArray
+            _, _, _, _, pos = parse_rect_px(body, pos)
+            pos += 1
+        if pos >= len(body):
+            return ids
+        fill_count = body[pos]
+        pos += 1
+        if fill_count == 0xFF and pos + 2 <= len(body):
+            fill_count = struct.unpack("<H", body[pos:pos + 2])[0]
+            pos += 2
+        has_alpha = tag_code in (32, 83)
+        for _ in range(fill_count):
+            if pos >= len(body):
+                break
+            ftype = body[pos]
+            pos += 1
+            if ftype == 0x00:
+                pos += 4 if has_alpha else 3
+            elif ftype in (0x10, 0x12, 0x13):
+                pos = skip_matrix(body, pos)
+                if pos >= len(body):
+                    break
+                grad_cnt = body[pos] & 0x0F
+                pos += 1 + grad_cnt * (5 if has_alpha else 4)
+                if ftype == 0x13:
+                    pos += 2
+            elif ftype in (0x40, 0x41, 0x42, 0x43):
+                if pos + 2 <= len(body):
+                    old_bmp = struct.unpack("<H", body[pos:pos + 2])[0]
+                    if old_bmp != 0xFFFF:
+                        ids.append(old_bmp)
+                pos += 2
+                pos = skip_matrix(body, pos)
+    except Exception:
+        pass
+    return ids
+
+
 def remap_shape_bitmap_ids(tag_code: int, body: bytes, id_offset: int) -> bytes:
-    """Remaps ShapeId and any BitmapId entries inside DefineShape/2/3 FillStyleArray."""
+    """Remaps ShapeId and any BitmapId entries inside DefineShape/2/3/4 FillStyleArray."""
     if len(body) < 4:
         return body
     old_id = struct.unpack("<H", body[:2])[0]
@@ -1169,6 +1510,10 @@ def remap_shape_bitmap_ids(tag_code: int, body: bytes, id_offset: int) -> bytes:
     out = bytearray(struct.pack("<H", new_id) + body[2:])
     try:
         _, _, _, _, pos = parse_rect_px(body, 2)
+        if tag_code == 83:
+            # DefineShape4 has EdgeBounds (RECT) + 1 byte flags before FillStyleArray
+            _, _, _, _, pos = parse_rect_px(body, pos)
+            pos += 1
         if pos >= len(body):
             return bytes(out)
         fill_count = body[pos]
@@ -1249,6 +1594,7 @@ def load_mission_bg_defs(bg_swf_path: str, id_offset: int = 45000):
                     _, _, _, ref_cid, _, cpos = parse_place3_info(sb)
                     if ref_cid is not None and cpos is not None:
                         sb = sb[:cpos] + struct.pack("<H", ref_cid + id_offset) + sb[cpos + 2 :]
+                    sb = optimize_place3_for_mobile_gpu(sb)
                 sub_chunks.append(encode_tag(sc, sb))
             def_tags.append(encode_tag(39, struct.pack("<HH", new_id, sfc) + b"".join(sub_chunks)))
             last_sprite_cid = new_id
@@ -1322,6 +1668,8 @@ def cmd_build_battle(
     back: str,
     skills_csv: str,
     bg_swf_path: str = "",
+    allies_swf_path: str = "",
+    ally_skills_csv: str = "",
 ):
     """
     Builds ONE unified 36 FPS Battle Stage SWF containing:
@@ -1381,8 +1729,9 @@ def cmd_build_battle(
     p_win_body, _ = build_variant_sprite(raw_698_body, 704, "win", loop_self=False)
     p_dead_body, _ = build_variant_sprite(raw_698_body, 705, "dead", loop_self=False)
     p_run_body, _ = build_variant_sprite(raw_698_body, 706, "run", loop_self=True)
+    p_item_body, p_item_dur = build_variant_sprite(raw_698_body, 707, "item", loop_self=False)
 
-    for vb in (p_standby_body, p_attack_body, p_charge_body, p_hit_body, p_win_body, p_dead_body, p_run_body):
+    for vb in (p_standby_body, p_attack_body, p_charge_body, p_hit_body, p_win_body, p_dead_body, p_run_body, p_item_body):
         out_tags.append(encode_tag(39, vb))
 
     # 2) Enemy definitions (1 to 3 simultaneous enemies, deduplicated by SWF path!)
@@ -1393,8 +1742,8 @@ def cmd_build_battle(
 
     FORMATION_POS = {
         1: [(630.0, 255.0)],
-        2: [(630.0, 200.0), (630.0, 298.0)],
-        3: [(630.0, 168.0), (630.0, 244.0), (630.0, 320.0)],
+        2: [(630.0, 255.0), (630.0, 168.0)],
+        3: [(630.0, 255.0), (630.0, 168.0), (630.0, 328.0)],
     }
     slot_positions = FORMATION_POS[len(enemy_paths)]
 
@@ -1447,6 +1796,7 @@ def cmd_build_battle(
                         _, _, _, ref_cid, _, cpos = parse_place3_info(sb)
                         if ref_cid is not None and cpos is not None:
                             sb = sb[:cpos] + struct.pack("<H", ref_cid + ene_offset) + sb[cpos + 2 :]
+                        sb = optimize_place3_for_mobile_gpu(sb)
                     sub_chunks.append(encode_tag(sc, sb))
                 remapped_b = struct.pack("<HH", new_id, sfc) + b"".join(sub_chunks)
                 if old_id == ene_main_sid:
@@ -1497,6 +1847,196 @@ def cmd_build_battle(
             "atk_dur": atk_dur,
         })
 
+    # 2b) Recruited Ally definitions (0 to 2 simultaneous NPC / Friend teammates on the player's side!)
+    # Load NPC attack posType metadata from public/game_data/npc.json so ranged/buff jutsus cast in place!
+    npc_attack_pos = {}
+    npc_json_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "public",
+        "game_data",
+        "npc.json",
+    )
+    if os.path.isfile(npc_json_path):
+        try:
+            with open(npc_json_path, "r", encoding="utf-8") as nf:
+                for n_obj in json.load(nf):
+                    nid = str(n_obj.get("id", ""))
+                    if nid and nid not in npc_attack_pos:
+                        pos_map = {}
+                        for atk in (n_obj.get("attacks") or []):
+                            anim = str(atk.get("animation") or "")
+                            pt = str(atk.get("posType") or "melee_1").lower()
+                            atk_dmg = float(atk.get("dmg") or 0)
+                            effs = atk.get("effects") or []
+                            targets_master = any(str(e.get("target") or "").lower() == "master" for e in effs)
+                            if anim:
+                                if atk_dmg <= 0:
+                                    pos_map[anim] = "buff_master" if targets_master else "buff"
+                                elif pt.startswith("melee"):
+                                    pos_map[anim] = "melee"
+                                else:
+                                    pos_map[anim] = "ranged"
+                        npc_attack_pos[nid] = pos_map
+        except Exception:
+            pass
+
+    ally_paths = [p.strip() for p in allies_swf_path.split(",") if p.strip() and os.path.isfile(p.strip())][:2]
+    ALLY_POS = [(220.0, 168.0), (220.0, 328.0)]
+    unique_ally_meta = {}
+    unique_ally_idx = 0
+    for ap in ally_paths:
+        if ap in unique_ally_meta:
+            continue
+        ally_data = decompress_swf(ap)
+        _, _, _, ally_tag_start = parse_header(ally_data)
+        ally_tags = parse_tags(ally_data, ally_tag_start)
+        ally_offset = 52000 + unique_ally_idx * 3000
+        ally_stem = os.path.splitext(os.path.basename(ap))[0].split(" ")[0]
+        ally_sprites = {}
+        ally_root_candidates = []
+
+        # Build compact sequential ID map so dressed Friend SWFs (whose internal gear CIDs reach ~21000)
+        # NEVER overflow the 16-bit SWF CharacterID limit (65535) when remapped!
+        ally_id_map = {}
+        next_ally_cid = ally_offset
+        for c, b in ally_tags:
+            if c in DEFINITION_TAGS and c not in (14,) and len(b) >= 2:
+                oid = struct.unpack("<H", b[:2])[0]
+                if oid not in ally_id_map:
+                    ally_id_map[oid] = next_ally_cid
+                    next_ally_cid += 1
+            if c == 39:
+                sid, sfc = struct.unpack("<HH", b[:4])
+                ally_sprites[sid] = (sfc, b)
+            elif c == 26:
+                _, dp, cid, nm = parse_place2_info(b)
+                if cid is not None:
+                    ally_root_candidates.append((dp, cid, nm))
+
+        ally_main_sid = None
+        for _, cid, nm in ally_root_candidates:
+            if nm == ally_stem and cid in ally_sprites:
+                ally_main_sid = cid
+                break
+        if ally_main_sid is None and ally_sprites:
+            ally_main_sid = max(ally_sprites.keys(), key=lambda k: ally_sprites[k][0])
+
+        raw_ally_main_body = None
+        for c, b in ally_tags:
+            if c not in DEFINITION_TAGS or c in (14,):
+                continue
+            old_id = struct.unpack("<H", b[:2])[0]
+            new_id = ally_id_map[old_id]
+            if c == 39:
+                sfc = struct.unpack("<H", b[2:4])[0]
+                sub_chunks = []
+                for sc, sb in parse_tags(b, 4):
+                    if sc in (12, 14, 15, 18, 19, 45):
+                        continue
+                    if sc == 26 and (sb[0] & 0x02):
+                        old_ref = struct.unpack("<H", sb[3:5])[0]
+                        ref_id = ally_id_map.get(old_ref, old_ref)
+                        sb = sb[:3] + struct.pack("<H", ref_id) + sb[5:]
+                    elif sc == 70:
+                        _, _, _, ref_cid, _, cpos = parse_place3_info(sb)
+                        if ref_cid is not None and cpos is not None:
+                            mapped_ref = ally_id_map.get(ref_cid, ref_cid)
+                            sb = sb[:cpos] + struct.pack("<H", mapped_ref) + sb[cpos + 2 :]
+                        sb = optimize_place3_for_mobile_gpu(sb)
+                    sub_chunks.append(encode_tag(sc, sb))
+                remapped_b = struct.pack("<HH", new_id, sfc) + b"".join(sub_chunks)
+                if old_id == ally_main_sid:
+                    raw_ally_main_body = remapped_b
+                else:
+                    out_tags.append(encode_tag(39, remapped_b))
+            else:
+                out_tags.append(encode_tag(c, struct.pack("<H", new_id) + b[2:]))
+
+        if raw_ally_main_body is None:
+            continue
+
+        # Reverse map for looking up original sprite frame counts (e.g. effectMc duration)
+        ally_rev_map = {v: k for k, v in ally_id_map.items()}
+
+        # Discover ALL authentic attack labels + standalone buff effectMc sprites inside this NPC SWF
+        found_labels = set()
+        label_effect_cid = {}
+        cur_lbl = ""
+        for sc, sb_b in parse_tags(raw_ally_main_body, 4):
+            if sc == 43:
+                cur_lbl = sb_b.split(b"\x00")[0].decode("utf-8", errors="ignore").strip()
+                if cur_lbl:
+                    found_labels.add(cur_lbl)
+            elif cur_lbl.startswith("attack_"):
+                if sc == 26:
+                    _, _, r_cid, r_nm = parse_place2_info(sb_b)
+                    if r_cid is not None and r_nm and "effect" in r_nm.lower():
+                        label_effect_cid[cur_lbl] = r_cid
+                elif sc == 70:
+                    _, _, _, r_cid, r_nm, _ = parse_place3_info(sb_b)
+                    if r_cid is not None and r_nm and "effect" in r_nm.lower():
+                        label_effect_cid[cur_lbl] = r_cid
+
+        atk_labels = [f"attack_0{k}" for k in range(1, 9) if f"attack_0{k}" in found_labels]
+        if not atk_labels:
+            atk_labels = ["attack_01"]
+
+        a_base_cid = 860 + unique_ally_idx * 10
+        a_standby_body, _ = build_variant_sprite(raw_ally_main_body, a_base_cid + 0, "standby", loop_self=True)
+        a_hit_body, _ = build_variant_sprite(raw_ally_main_body, a_base_cid + 2, "hit", loop_self=False)
+        a_dead_body, _ = build_variant_sprite(raw_ally_main_body, a_base_cid + 3, "dead", loop_self=False)
+
+        atk_variants = []  # list of (label, cid, dur, cast_mode, effect_cid)
+        pos_map = npc_attack_pos.get(ally_stem, {})
+        for k_idx, atk_lbl in enumerate(atk_labels[:8]):
+            atk_cid = 900 + unique_ally_idx * 10 + k_idx
+            c_mode = pos_map.get(atk_lbl, "melee")
+            eff_cid = label_effect_cid.get(atk_lbl, 0)
+            strip_set = {eff_cid} if (c_mode == "buff_master" and eff_cid > 0) else None
+            atk_body, atk_dur = build_variant_sprite(
+                raw_ally_main_body, atk_cid, atk_lbl, loop_self=False, strip_cids=strip_set
+            )
+            out_tags.append(encode_tag(39, atk_body))
+            final_dur = max(22, atk_dur)
+            if c_mode == "buff_master" and eff_cid > 0:
+                orig_eff_sid = ally_rev_map.get(eff_cid, 0)
+                eff_fc = ally_sprites.get(orig_eff_sid, (0, b""))[0]
+                if eff_fc > 0:
+                    # Play standalone buff effectMc for its exact native duration (no extra loop!)
+                    final_dur = max(18, min(final_dur, eff_fc))
+            atk_variants.append((atk_lbl, atk_cid, final_dur, c_mode, eff_cid))
+
+        first_atk_cid = atk_variants[0][1]
+        for vb in (a_standby_body, a_hit_body, a_dead_body):
+            out_tags.append(encode_tag(39, vb))
+
+        unique_ally_meta[ap] = (a_base_cid, first_atk_cid, a_base_cid + 2, a_base_cid + 3, atk_variants)
+        unique_ally_idx += 1
+
+    ally_slots = []
+    for idx, ap in enumerate(ally_paths):
+        if ap not in unique_ally_meta:
+            continue
+        sb_cid, atk_cid, hit_cid, dead_cid, atk_variants = unique_ally_meta[ap]
+        wrapper_cid = 890 + idx
+        out_tags.append(encode_tag(39, build_enemy_slot_wrapper(wrapper_cid, sb_cid, atk_cid, hit_cid, dead_cid)))
+        ax, ay = ALLY_POS[idx]
+        ally_slots.append({
+            "idx": idx,
+            "name": f"a{idx}",
+            "depth": 7 + idx,        # persistent ally wrapper depths (7, 8)
+            "actor_depth": 14 + idx, # temporary clip depth during ally dash/attack/cast (14, 15)
+            "vfx_depth": 16 + idx,   # temporary clip depth for standalone buff aura over Player (16, 17)
+            "wrapper_cid": wrapper_cid,
+            "tx": ax,
+            "ty": ay,
+            "standby": sb_cid,
+            "attack": atk_cid,
+            "hit": hit_cid,
+            "dead": dead_cid,
+            "atk_variants": atk_variants,
+        })
+
     # Load skill cast mode (melee / ranged / self) from public/game_data/skills.json
     skill_cast_mode = {}
     skills_json_path = os.path.join(
@@ -1523,7 +2063,7 @@ def cmd_build_battle(
             pass
 
     # 3) Equipped Skills (up to 6 skills, dressed with player equipment!)
-    skill_ids = [s.strip() for s in skills_csv.split(",") if s.strip()][:6]
+    skill_ids = [s.strip() for s in skills_csv.split(",") if s.strip()][:8]
     skill_entries = []  # (seq_key, skill_sid, skill_fc, cast_mode, cast_offset_x)
     for idx, sk_id in enumerate(skill_ids):
         sk_file = os.path.join(skills_dir, sk_id if sk_id.endswith(".swf") else f"{sk_id}.swf")
@@ -1537,8 +2077,48 @@ def cmd_build_battle(
             clean_key = sk_id.replace(".swf", "")
             default_mode = "melee" if clean_key in ("skill_01", "skill_12") else "ranged"
             c_mode = skill_cast_mode.get(clean_key, default_mode)
-            c_off = measure_skill_reach_px(sk_file) if c_mode == "ranged" else 58.0
+            c_off = measure_skill_reach_px(sk_file) if c_mode == "ranged" else 68.0
             skill_entries.append((clean_key, s_main_sid, max(20, s_fc), c_mode, c_off))
+
+    # 3b) Recruited Friend Equipped Skills (up to 6 skills per Friend, compiled cleanly into 58000..65000!)
+    ally_skills_per_slot = [s.strip() for s in ally_skills_csv.split(",")] if ally_skills_csv else []
+    ally_skill_entries = {}  # ally_idx -> list of (clean_key, s_main_sid, s_fc, c_mode, c_off)
+    loaded_friend_skills = {}  # clean_key -> (s_main_sid, s_fc, c_mode, c_off)
+    friend_skill_next_offset = 58000
+    for al in ally_slots:
+        ai = al["idx"]
+        spec = ally_skills_per_slot[ai] if ai < len(ally_skills_per_slot) else ""
+        if not spec or spec == "none":
+            continue
+        f_sk_ids = [s.strip() for s in spec.split("+") if s.strip()][:6]
+        slot_list = []
+        for sk_id in f_sk_ids:
+            clean_key = sk_id.replace(".swf", "")
+            # Reuse already-compiled player skill if identical, or compile into 58000+ range!
+            existing_player = next((e for e in skill_entries if e[0] == clean_key), None)
+            if existing_player:
+                slot_list.append(existing_player)
+                continue
+            if clean_key in loaded_friend_skills:
+                s_sid, s_fc, c_mode, c_off = loaded_friend_skills[clean_key]
+                slot_list.append((clean_key, s_sid, s_fc, c_mode, c_off))
+                continue
+            if friend_skill_next_offset > 64200:
+                continue
+            sk_file = os.path.join(skills_dir, sk_id if sk_id.endswith(".swf") else f"{sk_id}.swf")
+            if not os.path.isfile(sk_file):
+                continue
+            s_defs, s_main_sid, s_fc = load_dressed_skill_defs(sk_file, friend_skill_next_offset, parts_by_name)
+            friend_skill_next_offset += 650
+            out_tags.extend(s_defs)
+            if s_main_sid is not None:
+                default_mode = "melee" if clean_key in ("skill_01", "skill_12") else "ranged"
+                c_mode = skill_cast_mode.get(clean_key, default_mode)
+                c_off = measure_skill_reach_px(sk_file) if c_mode == "ranged" else 68.0
+                loaded_friend_skills[clean_key] = (s_main_sid, max(20, s_fc), c_mode, c_off)
+                slot_list.append((clean_key, s_main_sid, max(20, s_fc), c_mode, c_off))
+        if slot_list:
+            ally_skill_entries[ai] = slot_list
 
     # 4) Plan Root Timeline Frame Segments
     # Frame 1: Initial Battle Setup (clears all depths, places ALL enemies in standby)
@@ -1547,8 +2127,8 @@ def cmd_build_battle(
     # Frames 4..26: Idle loop (polls __pollCmd every frame, loops F26 -> F4)
     IDLE_FRAMES = 26
     RESET_PLAYER_FRAME = 2
-    DASH_IN_FRAMES = 6
-    DASH_OUT_FRAMES = 5
+    DASH_IN_FRAMES = 10
+    DASH_OUT_FRAMES = 9
     cur_frame = IDLE_FRAMES + 1
 
     sequences = []
@@ -1556,17 +2136,23 @@ def cmd_build_battle(
 
     def register_seq(
         name: str,
-        kind: str,  # "player_atk" | "player_skill" | "player_charge" | "player_win" | "enemy_atk"
+        kind: str,  # "player_atk" | "player_skill" | "player_charge" | "player_win" | "enemy_atk" | "ally_atk"
         act_duration: int,
         hit_offset: int,
         slot_idx: int = 0,
         skill_cid: int = 0,
         cast_mode: str = "melee",  # "melee" | "ranged" | "self"
-        cast_offset_x: float = 58.0,
+        cast_offset_x: float = 68.0,
         is_kill: bool = False,
+        ally_idx: int = 0,
+        effect_cid: int = 0,
     ):
         nonlocal cur_frame
-        has_dash = kind in ("player_atk", "enemy_atk") or (kind == "player_skill" and cast_mode in ("melee", "ranged"))
+        has_dash = (
+            kind in ("player_atk", "enemy_atk")
+            or (kind == "player_skill" and cast_mode in ("melee", "ranged"))
+            or (kind == "ally_atk" and cast_mode in ("melee", "ranged"))
+        )
         dash_in = DASH_IN_FRAMES if has_dash else 0
         # On enemy_atk_kill (player dies), battle ends so no dash-out needed
         end_stop = (kind == "player_win") or (kind == "enemy_atk" and is_kill)
@@ -1589,7 +2175,9 @@ def cmd_build_battle(
             "end_frame": end_frame,
             "hit_frame": act_start + max(1, min(act_duration - 2, hit_offset)),
             "slot_idx": slot_idx,
+            "ally_idx": ally_idx,
             "skill_cid": skill_cid,
+            "effect_cid": effect_cid,
             "cast_mode": cast_mode,
             "cast_offset_x": cast_offset_x,
             "is_kill": is_kill,
@@ -1599,8 +2187,10 @@ def cmd_build_battle(
 
     p_atk_len = max(22, p_atk_dur)
     p_chg_len = max(22, p_chg_dur)
+    p_item_len = max(20, p_item_dur)
 
     register_seq("player_charge", "player_charge", p_chg_len, 10, cast_mode="self")
+    register_seq("player_item", "player_item", p_item_len, max(8, int(p_item_len * 0.55)), cast_mode="self")
     register_seq("player_win", "player_win", 20, 2, cast_mode="self")
 
     for sl in enemy_slots:
@@ -1620,6 +2210,33 @@ def cmd_build_battle(
                 f"skill_{sk_key}_t{t}_kill", "player_skill", sk_fc, hit_off,
                 slot_idx=t, skill_cid=sk_sid, cast_mode=c_mode, cast_offset_x=c_off, is_kill=True
             )
+
+        for al in ally_slots:
+            ai = al["idx"]
+            for v_idx, (atk_lbl, atk_cid, atk_dur, c_mode, eff_cid) in enumerate(al["atk_variants"]):
+                hit_off = max(10, int(atk_dur * 0.55))
+                register_seq(
+                    f"a{ai}_{atk_lbl}_t{t}", "ally_atk", atk_dur, hit_off,
+                    slot_idx=t, skill_cid=atk_cid, cast_mode=c_mode, is_kill=False, ally_idx=ai, effect_cid=eff_cid
+                )
+                register_seq(
+                    f"a{ai}_{atk_lbl}_t{t}_kill", "ally_atk", atk_dur, hit_off,
+                    slot_idx=t, skill_cid=atk_cid, cast_mode=c_mode, is_kill=True, ally_idx=ai, effect_cid=eff_cid
+                )
+                if v_idx == 0:
+                    cmd_to_frame[f"a{ai}_atk_t{t}"] = cmd_to_frame[f"a{ai}_{atk_lbl}_t{t}"]
+                    cmd_to_frame[f"a{ai}_atk_t{t}_kill"] = cmd_to_frame[f"a{ai}_{atk_lbl}_t{t}_kill"]
+
+            for f_key, f_sid, f_fc, f_mode, f_off in ally_skill_entries.get(ai, []):
+                f_hit = max(10, int(f_fc * 0.58))
+                register_seq(
+                    f"a{ai}_skill_{f_key}_t{t}", "ally_atk", f_fc, f_hit,
+                    slot_idx=t, skill_cid=f_sid, cast_mode=f_mode, cast_offset_x=f_off, is_kill=False, ally_idx=ai
+                )
+                register_seq(
+                    f"a{ai}_skill_{f_key}_t{t}_kill", "ally_atk", f_fc, f_hit,
+                    slot_idx=t, skill_cid=f_sid, cast_mode=f_mode, cast_offset_x=f_off, is_kill=True, ally_idx=ai
+                )
 
     total_root_frames = cur_frame - 1
 
@@ -1650,15 +2267,25 @@ def cmd_build_battle(
                         CHAR_SCALE, CHAR_SCALE, move=False, name=sl["name"]
                     )
                 )
+            # Initial boot: place ALL recruited ally wrapper clips ONCE with names "a0", "a1" (facing right!)
+            for al in ally_slots:
+                out_tags.append(
+                    encode_place_object2(
+                        al["depth"], al["wrapper_cid"], al["tx"], al["ty"],
+                        -CHAR_SCALE, CHAR_SCALE, move=False, name=al["name"]
+                    )
+                )
             out_tags.append(encode_tag(28, struct.pack("<H", PLAYER_DEPTH)))
         elif f == 2:
-            # Player-only reset frame (targeted by gotoAndPlay(2) after any action so enemy dead/idle states are preserved!)
-            # Also clears any temporary enemy actor clips (they are never left on stage).
+            # Player-only reset frame (clears PLAYER_DEPTH & temporary actor/vfx depths so Frame 3 forward-steps 700!)
             out_tags.append(encode_tag(28, struct.pack("<H", PLAYER_DEPTH)))
             for sl in enemy_slots:
                 out_tags.append(encode_tag(28, struct.pack("<H", sl["actor_depth"])))
+            for al in ally_slots:
+                out_tags.append(encode_tag(28, struct.pack("<H", al["actor_depth"])))
+                out_tags.append(encode_tag(28, struct.pack("<H", al["vfx_depth"])))
         elif f == 3:
-            # Forward-step placement guarantees 700 (Player_Standby) Frame 1 DoAction always executes!
+            # Forward-step placement guarantees 700 (Player_Standby) Frame 1 DoAction (gotoAndPlay(10)) ALWAYS executes!
             out_tags.append(encode_place_object2(PLAYER_DEPTH, 700, PLAYER_TX, PLAYER_TY, -CHAR_SCALE, CHAR_SCALE, move=False))
             out_tags.append(encode_tag(12, poll_normal_bc))
         else:
@@ -1671,8 +2298,8 @@ def cmd_build_battle(
         sl = enemy_slots[seq["slot_idx"]]
         e_name = sl["name"]
         e_tx, e_ty = sl["tx"], sl["ty"]
-        # Use exact auto-measured projectile reach per skill (e.g. 220px for Water Burst / Fireball, 135px for Wind Cannon)
-        cast_offset_x = float(seq.get("cast_offset_x", 58.0))
+        # Use exact auto-measured projectile reach per skill, or 68px melee standoff
+        cast_offset_x = float(seq.get("cast_offset_x", 68.0))
         p_melee_tx = e_tx - cast_offset_x
         p_melee_ty = e_ty
 
@@ -1684,10 +2311,13 @@ def cmd_build_battle(
         end_f = seq["end_frame"]
 
         for f in range(start_f, end_f + 1):
-            # Guard: at the very first frame of ANY sequence, ensure all enemy actor depths are cleanly removed
+            # Guard: at the very first frame of ANY sequence, ensure all enemy & ally actor depths are cleanly removed
             if f == start_f:
                 for sl_guard in enemy_slots:
                     out_tags.append(encode_tag(28, struct.pack("<H", sl_guard["actor_depth"])))
+                for al_guard in ally_slots:
+                    out_tags.append(encode_tag(28, struct.pack("<H", al_guard["actor_depth"])))
+                    out_tags.append(encode_tag(28, struct.pack("<H", al_guard["vfx_depth"])))
 
             # --- Player Win Pose ---
             if kind == "player_win":
@@ -1699,11 +2329,12 @@ def cmd_build_battle(
                 out_tags.append(encode_tag(1, b""))
                 continue
 
-            # --- Player Charge ---
-            if kind == "player_charge":
+            # --- Player Charge / Player Item Scroll ---
+            if kind in ("player_charge", "player_item"):
                 if f == start_f:
                     out_tags.append(encode_tag(28, struct.pack("<H", PLAYER_DEPTH)))
-                    out_tags.append(encode_place_object2(PLAYER_DEPTH, 702, PLAYER_TX, PLAYER_TY, -CHAR_SCALE, CHAR_SCALE, move=False))
+                    p_cid = 707 if kind == "player_item" else 702
+                    out_tags.append(encode_place_object2(PLAYER_DEPTH, p_cid, PLAYER_TX, PLAYER_TY, -CHAR_SCALE, CHAR_SCALE, move=False))
                 if f == seq["hit_frame"]:
                     out_tags.append(encode_tag(12, avm1_notify_js("__onHit")))
                 if f == end_f:
@@ -1716,8 +2347,10 @@ def cmd_build_battle(
                 if dash_in > 0 and start_f <= f < act_start:
                     step = f - start_f
                     t = (step + 1) / float(dash_in)
-                    tx = PLAYER_TX + (p_melee_tx - PLAYER_TX) * t
-                    ty = PLAYER_TY + (p_melee_ty - PLAYER_TY) * t
+                    # Smooth Ease-Out Cubic ninja sprint (explosive launch, crisp brake at target!)
+                    e = 1.0 - (1.0 - t) ** 3
+                    tx = PLAYER_TX + (p_melee_tx - PLAYER_TX) * e
+                    ty = PLAYER_TY + (p_melee_ty - PLAYER_TY) * e
                     if f == start_f:
                         out_tags.append(encode_tag(28, struct.pack("<H", PLAYER_DEPTH)))
                         out_tags.append(encode_place_object2(PLAYER_DEPTH, 706, tx, ty, -CHAR_SCALE, CHAR_SCALE, move=False))
@@ -1732,16 +2365,28 @@ def cmd_build_battle(
                     out_tags.append(encode_place_object2(PLAYER_DEPTH, p_cid, cast_tx, cast_ty, -CHAR_SCALE, CHAR_SCALE, move=False))
 
                 if f == seq["hit_frame"]:
-                    # Frame 3 = hit, Frame 4 = dead on target EnemySlot wrapper ONLY!
-                    target_frame = 4 if seq["is_kill"] else 3
-                    bc = avm1_clip_goto_stop_raw(e_name, target_frame) + avm1_notify_js("__onHit")
-                    out_tags.append(encode_tag(12, bc))
+                    if kind == "player_skill" and seq["cast_mode"] == "self":
+                        # Self-buff skill: NEVER trigger enemy hit animation!
+                        out_tags.append(encode_tag(12, avm1_notify_js("__onHit")))
+                    else:
+                        # Frame 3->4 = forward-stepped hit, Frame 8->9 = forward-stepped dead!
+                        target_frame = 8 if seq["is_kill"] else 3
+                        bc = avm1_clip_goto_play_raw(e_name, target_frame) + avm1_notify_js("__onHit")
+                        out_tags.append(encode_tag(12, bc))
+
+                # Auto-restore enemy to Frame 6->7 (fresh standby idle) 16 frames after hit so stunned/restricted enemies NEVER lose idle animation!
+                hit_recover_f = min(end_f, seq["hit_frame"] + 16)
+                if f == hit_recover_f and f < end_f and not seq["is_kill"] and not (kind == "player_skill" and seq["cast_mode"] == "self"):
+                    out_tags.append(encode_tag(12, avm1_clip_goto_play_raw(e_name, 6) + b"\x00"))
 
                 if dash_out > 0 and act_end < f <= end_f:
                     step = f - (act_end + 1)
                     t = (step + 1) / float(dash_out)
-                    tx = p_melee_tx + (PLAYER_TX - p_melee_tx) * t
-                    ty = p_melee_ty + (PLAYER_TY - p_melee_ty) * t
+                    # Smooth Ease-In-Out Cubic + subtle 14px airborne shinobi backstep arc!
+                    e = 3.0 * t * t - 2.0 * t * t * t
+                    arc_y = -math.sin(math.pi * t) * 14.0
+                    tx = p_melee_tx + (PLAYER_TX - p_melee_tx) * e
+                    ty = p_melee_ty + (PLAYER_TY - p_melee_ty) * e + arc_y
                     if step == 0:
                         out_tags.append(encode_tag(28, struct.pack("<H", PLAYER_DEPTH)))
                         out_tags.append(encode_place_object2(PLAYER_DEPTH, 706, tx, ty, -CHAR_SCALE, CHAR_SCALE, move=False))
@@ -1753,7 +2398,8 @@ def cmd_build_battle(
                         out_tags.append(encode_move_object2(PLAYER_DEPTH, tx, ty, -CHAR_SCALE, CHAR_SCALE))
 
                 if f == end_f:
-                    prefix = b"" if seq["is_kill"] else avm1_clip_goto_stop_raw(e_name, 1)
+                    is_self_skill = kind == "player_skill" and seq["cast_mode"] == "self"
+                    prefix = b"" if (seq["is_kill"] or is_self_skill) else avm1_clip_goto_play_raw(e_name, 6)
                     out_tags.append(encode_tag(12, prefix + avm1_notify_js("__onDone", avm1_goto_and_play(RESET_PLAYER_FRAME))))
 
                 out_tags.append(encode_tag(1, b""))
@@ -1776,8 +2422,9 @@ def cmd_build_battle(
                 if dash_in > 0 and start_f <= f < act_start:
                     step = f - start_f
                     t = (step + 1) / float(dash_in)
-                    tx = e_tx + (ENEMY_MELEE_TX - e_tx) * t
-                    ty = e_ty + (PLAYER_TY - e_ty) * t
+                    e = 1.0 - (1.0 - t) ** 3
+                    tx = e_tx + (ENEMY_MELEE_TX - e_tx) * e
+                    ty = e_ty + (PLAYER_TY - e_ty) * e
                     if f == start_f:
                         out_tags.append(encode_tag(28, struct.pack("<H", a_depth)))
                         out_tags.append(encode_place_object2(a_depth, sl["standby"], tx, ty, CHAR_SCALE, CHAR_SCALE, move=False))
@@ -1797,8 +2444,10 @@ def cmd_build_battle(
                 if dash_out > 0 and act_end < f < end_f:
                     step = f - (act_end + 1)
                     t = (step + 1) / float(dash_out)
-                    tx = ENEMY_MELEE_TX + (e_tx - ENEMY_MELEE_TX) * t
-                    ty = PLAYER_TY + (e_ty - PLAYER_TY) * t
+                    e = 3.0 * t * t - 2.0 * t * t * t
+                    arc_y = -math.sin(math.pi * t) * 14.0
+                    tx = ENEMY_MELEE_TX + (e_tx - ENEMY_MELEE_TX) * e
+                    ty = PLAYER_TY + (e_ty - PLAYER_TY) * e + arc_y
                     if step == 0:
                         out_tags.append(encode_tag(28, struct.pack("<H", a_depth)))
                         out_tags.append(encode_place_object2(a_depth, sl["standby"], tx, ty, CHAR_SCALE, CHAR_SCALE, move=False))
@@ -1806,11 +2455,104 @@ def cmd_build_battle(
                         out_tags.append(encode_move_object2(a_depth, tx, ty, CHAR_SCALE, CHAR_SCALE))
 
                 if f == end_f:
-                    # ALWAYS remove actor depth and restore wrapper
+                    # ALWAYS remove actor depth and forward-step wrapper into fresh standby (Frame 6->7)
                     out_tags.append(encode_tag(28, struct.pack("<H", a_depth)))
-                    frame_bc.extend(avm1_clip_goto_stop_raw(e_name, 1))  # show wrapper again (standby, home slot)
+                    frame_bc.extend(avm1_clip_goto_play_raw(e_name, 6))
                     tail_action = avm1_stop() if seq["end_stop"] else avm1_goto_and_play(RESET_PLAYER_FRAME)
                     frame_bc.extend(avm1_notify_js("__onDone", tail_action))
+                    out_tags.append(encode_tag(12, bytes(frame_bc)))
+                elif frame_bc:
+                    frame_bc.append(0x00)
+                    out_tags.append(encode_tag(12, bytes(frame_bc)))
+
+                out_tags.append(encode_tag(1, b""))
+                continue
+
+            # --- Recruited Ally Attack ---
+            if kind == "ally_atk":
+                al = ally_slots[seq["ally_idx"]]
+                a_name = al["name"]
+                a_depth = al["actor_depth"]
+                v_depth = al["vfx_depth"]
+                al_tx, al_ty = al["tx"], al["ty"]
+                al_melee_tx = e_tx - float(seq.get("cast_offset_x", 68.0))
+                al_melee_ty = e_ty
+                is_master_buff_vfx = (seq["cast_mode"] == "buff_master" and int(seq.get("effect_cid") or 0) > 0)
+                frame_bc = bytearray()
+
+                if f == start_f:
+                    frame_bc.extend(avm1_clip_goto_stop_raw(a_name, 5))  # hide persistent ally wrapper while casting/attacking
+
+                if dash_in > 0 and start_f <= f < act_start:
+                    step = f - start_f
+                    t = (step + 1) / float(dash_in)
+                    e = 1.0 - (1.0 - t) ** 3
+                    tx = al_tx + (al_melee_tx - al_tx) * e
+                    ty = al_ty + (al_melee_ty - al_ty) * e
+                    if f == start_f:
+                        out_tags.append(encode_tag(28, struct.pack("<H", a_depth)))
+                        out_tags.append(encode_place_object2(a_depth, al["standby"], tx, ty, -CHAR_SCALE, CHAR_SCALE, move=False))
+                    else:
+                        out_tags.append(encode_move_object2(a_depth, tx, ty, -CHAR_SCALE, CHAR_SCALE))
+
+                if f == act_start:
+                    out_tags.append(encode_tag(28, struct.pack("<H", a_depth)))
+                    out_tags.append(encode_tag(28, struct.pack("<H", v_depth)))
+                    act_cid = seq["skill_cid"] or al["attack"]
+                    if is_master_buff_vfx:
+                        # NPC performs its authentic hand-seal casting animation at its OWN slot (al_tx, al_ty),
+                        # while standalone buff effectMc plays simultaneously on top of the Player!
+                        out_tags.append(
+                            encode_place_object2(
+                                a_depth, act_cid, al_tx, al_ty, -CHAR_SCALE, CHAR_SCALE, move=False
+                            )
+                        )
+                        out_tags.append(
+                            encode_place_object2(
+                                v_depth, int(seq["effect_cid"]), PLAYER_TX, PLAYER_TY - 10.0,
+                                -CHAR_SCALE, CHAR_SCALE, move=False
+                            )
+                        )
+                    else:
+                        if seq["cast_mode"] == "buff_master":
+                            cast_tx, cast_ty = PLAYER_TX, PLAYER_TY + 36.0
+                        elif dash_in > 0:
+                            cast_tx, cast_ty = al_melee_tx, al_melee_ty
+                        else:
+                            cast_tx, cast_ty = al_tx, al_ty
+                        out_tags.append(encode_place_object2(a_depth, act_cid, cast_tx, cast_ty, -CHAR_SCALE, CHAR_SCALE, move=False))
+
+                if f == seq["hit_frame"]:
+                    if seq["cast_mode"] not in ("buff", "buff_master"):
+                        target_frame = 8 if seq["is_kill"] else 3
+                        frame_bc.extend(avm1_clip_goto_play_raw(e_name, target_frame))
+                    frame_bc.extend(avm1_notify_js("__onHit")[:-1])
+
+                # Auto-restore enemy to Frame 6->7 (fresh standby idle) 16 frames after hit so stunned/restricted enemies NEVER lose idle animation!
+                ally_hit_recover_f = min(end_f, seq["hit_frame"] + 16)
+                if f == ally_hit_recover_f and f < end_f and not seq["is_kill"] and seq["cast_mode"] not in ("buff", "buff_master"):
+                    frame_bc.extend(avm1_clip_goto_play_raw(e_name, 6))
+
+                if dash_out > 0 and act_end < f < end_f:
+                    step = f - (act_end + 1)
+                    t = (step + 1) / float(dash_out)
+                    e = 3.0 * t * t - 2.0 * t * t * t
+                    arc_y = -math.sin(math.pi * t) * 14.0
+                    tx = al_melee_tx + (al_tx - al_melee_tx) * e
+                    ty = al_melee_ty + (al_ty - al_melee_ty) * e + arc_y
+                    if step == 0:
+                        out_tags.append(encode_tag(28, struct.pack("<H", a_depth)))
+                        out_tags.append(encode_place_object2(a_depth, al["standby"], tx, ty, -CHAR_SCALE, CHAR_SCALE, move=False))
+                    else:
+                        out_tags.append(encode_move_object2(a_depth, tx, ty, -CHAR_SCALE, CHAR_SCALE))
+
+                if f == end_f:
+                    out_tags.append(encode_tag(28, struct.pack("<H", a_depth)))
+                    out_tags.append(encode_tag(28, struct.pack("<H", v_depth)))
+                    frame_bc.extend(avm1_clip_goto_play_raw(a_name, 6))
+                    if not seq["is_kill"] and seq["cast_mode"] not in ("buff", "buff_master"):
+                        frame_bc.extend(avm1_clip_goto_play_raw(e_name, 6))
+                    frame_bc.extend(avm1_notify_js("__onDone", avm1_goto_and_play(RESET_PLAYER_FRAME)))
                     out_tags.append(encode_tag(12, bytes(frame_bc)))
                 elif frame_bc:
                     frame_bc.append(0x00)
@@ -1897,7 +2639,12 @@ def main():
     elif mode == "extract-village-map":
         cmd_extract_village_map(sys.argv[2], sys.argv[3])
     elif mode == "build-entity":
-        cmd_build_entity(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else "standby")
+        cmd_build_entity(
+            sys.argv[2],
+            sys.argv[3],
+            sys.argv[4] if len(sys.argv) > 4 else "standby",
+            preview=(len(sys.argv) > 5 and sys.argv[5] == "preview"),
+        )
     elif mode == "build-skill":
         cmd_build_skill(sys.argv[2], sys.argv[3])
     elif mode == "build-skill-icons":
@@ -1941,6 +2688,8 @@ def main():
             sys.argv[11],
             sys.argv[12] if len(sys.argv) > 12 else "skill_01",
             sys.argv[13] if len(sys.argv) > 13 else "",
+            sys.argv[14] if len(sys.argv) > 14 else "",
+            sys.argv[15] if len(sys.argv) > 15 else "",
         )
     else:
         raise ValueError(f"Unknown mode: {mode}")

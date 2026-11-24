@@ -96,6 +96,12 @@ export interface BattleStartResponse {
     reward_gold: number;
     reward_xp: number;
   };
+  examContext?: {
+    service: string;
+    stageId: number;
+    stageTitle: string;
+    examLabel: string;
+  };
   enemies: Array<{
     id: string;
     name: string;
@@ -123,6 +129,9 @@ export interface BattleFinishResponse {
   xp: number;
   gold: number;
   level_up: boolean;
+  level_capped?: boolean;
+  cap_exam?: string | null;
+  dropped_items?: string[];
   error?: string;
 }
 
@@ -162,10 +171,12 @@ export class MobileApiClient {
     }
 
     if (!res.ok) {
+      const obj = typeof json === 'object' && json !== null ? (json as Record<string, unknown>) : null;
       const errMsg =
-        typeof json === 'object' && json !== null && 'error' in json
-          ? String((json as { error: unknown }).error)
-          : `HTTP ${res.status}`;
+        (obj?.error ? String(obj.error) : '') ||
+        (obj?.message ? String(obj.message) : '') ||
+        (obj?.result ? String(obj.result) : '') ||
+        `HTTP ${res.status}`;
       throw new Error(errMsg);
     }
 
@@ -282,13 +293,19 @@ export class MobileApiClient {
     sessionKey: string,
     missionId: string,
     token: string,
-    victory: boolean
+    victory: boolean,
+    usedItems?: Record<string, number>
   ): Promise<BattleFinishResponse> {
     return this.request<BattleFinishResponse>(
       '/api/v1/battle/finish',
       {
         method: 'POST',
-        body: JSON.stringify({ mission_id: missionId, token, victory }),
+        body: JSON.stringify({
+          mission_id: missionId,
+          token,
+          victory,
+          used_items: usedItems && Object.keys(usedItems).length > 0 ? usedItems : undefined,
+        }),
       },
       {
         'X-Character-Id': String(charId),

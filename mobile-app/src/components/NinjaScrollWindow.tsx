@@ -6,17 +6,16 @@ import {
   View,
   type ImageSourcePropType,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { BuildingSceneBackdrop } from './BuildingSceneBackdrop';
 
 /**
  * Authentic Ninja Saga / Ninja Sage parchment, bamboo & carved-wood UI palette.
  */
 export const NS_THEME = {
-  parchmentBg: 'rgba(235, 203, 141, 0.94)',
-  parchmentCard: '#F6E4BA',
-  parchmentCardAlt: '#ECD39B',
-  parchmentSelected: '#FFF1C9',
+  parchmentBg: 'rgba(235, 203, 141, 0.78)',
+  parchmentCard: 'rgba(246, 228, 186, 0.86)',
+  parchmentCardAlt: 'rgba(236, 211, 155, 0.80)',
+  parchmentSelected: 'rgba(255, 241, 201, 0.92)',
   woodBorder: '#6E3E16',
   woodBorderDark: '#3E2008',
   goldTrim: '#D9A438',
@@ -60,36 +59,38 @@ export function NinjaScrollWindow({
   children,
 }: NinjaScrollWindowProps) {
   return (
-    <SafeAreaView style={styles.root}>
-      <BuildingSceneBackdrop source={bgSource} scrimOpacity={0.28} />
+    <View style={styles.root}>
+      <BuildingSceneBackdrop source={bgSource} scrimOpacity={0.16} />
 
-      <View style={styles.windowOuter}>
-        {/* Top Row: Hanging Green Bamboo Scroll Header + Optional Center/Right + Red ✕ Close */}
-        <View style={styles.topRow}>
-          <View style={styles.bambooBanner}>
-            <View style={styles.bambooCapLeft} />
-            <View style={styles.bambooBody}>
-              <Text style={styles.bambooTitle} numberOfLines={1}>
-                {title}
-              </Text>
+      <View style={styles.safeWrap}>
+        <View style={styles.windowOuter}>
+          {/* Top Row: Hanging Green Bamboo Scroll Header + Optional Center/Right + Red ✕ Close */}
+          <View style={styles.topRow}>
+            <View style={styles.bambooBanner}>
+              <View style={styles.bambooCapLeft} />
+              <View style={styles.bambooBody}>
+                <Text style={styles.bambooTitle} numberOfLines={1}>
+                  {title}
+                </Text>
+              </View>
+              <View style={styles.bambooCapRight} />
             </View>
-            <View style={styles.bambooCapRight} />
+
+            {headerCenter ? <View style={styles.centerSlot}>{headerCenter}</View> : null}
+
+            <View style={styles.rightRow}>
+              {rightContent ? <View style={styles.rightSlot}>{rightContent}</View> : null}
+              <Pressable style={styles.closeBtn} onPress={onClose}>
+                <Text style={styles.closeTxt}>✕</Text>
+              </Pressable>
+            </View>
           </View>
 
-          {headerCenter ? <View style={styles.centerSlot}>{headerCenter}</View> : null}
-
-          <View style={styles.rightRow}>
-            {rightContent ? <View style={styles.rightSlot}>{rightContent}</View> : null}
-            <Pressable style={styles.closeBtn} onPress={onClose}>
-              <Text style={styles.closeTxt}>✕</Text>
-            </Pressable>
-          </View>
+          {/* Inner Parchment Content Area */}
+          <View style={styles.innerContent}>{children}</View>
         </View>
-
-        {/* Inner Parchment Content Area */}
-        <View style={styles.innerContent}>{children}</View>
       </View>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -97,6 +98,10 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: '#1B1108',
+    position: 'relative',
+  },
+  safeWrap: {
+    flex: 1,
     paddingHorizontal: 14,
     paddingVertical: 10,
   },

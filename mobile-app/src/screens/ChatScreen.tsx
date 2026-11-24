@@ -132,7 +132,7 @@ export function ChatScreen() {
       <View style={styles.body}>
         {/* Chat Stream */}
         <View style={styles.chatPane}>
-          <ScrollView style={styles.msgList} contentContainerStyle={styles.msgContent}>
+          <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} style={styles.msgList} contentContainerStyle={styles.msgContent}>
             {messages.map((m) => (
               <View key={m.id} style={styles.msgRow}>
                 <Text
@@ -148,7 +148,7 @@ export function ChatScreen() {
               </View>
             ))}
             {messages.length === 0 && (
-              <Text style={styles.emptyText}>Belum ada pesan di Global Chat.</Text>
+              <Text style={styles.emptyText}>No messages in Global Chat yet.</Text>
             )}
           </ScrollView>
 
@@ -157,7 +157,7 @@ export function ChatScreen() {
               style={styles.input}
               value={text}
               onChangeText={setText}
-              placeholder="Tulis pesan ke seluruh Ninja..."
+              placeholder="Type a message to all Shinobi..."
               placeholderTextColor="#64748B"
               onSubmitEditing={handleSend}
             />
@@ -170,7 +170,7 @@ export function ChatScreen() {
         {/* Online Ninjas Sidebar */}
         <View style={styles.usersPane}>
           <Text style={styles.sideTitle}>Online Ninjas ({onlineUsers.length})</Text>
-          <ScrollView>
+          <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false}>
             {onlineUsers.map((u) => (
               <Text key={u.id} style={styles.userItem}>
                 • {u.name}

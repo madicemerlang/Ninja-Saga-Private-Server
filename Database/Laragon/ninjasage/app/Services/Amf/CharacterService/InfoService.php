@@ -46,7 +46,7 @@ class InfoService
 
         $defaultSkill = $elementSkillMap[$char->element_1] ?? 'skill_01';
 
-        $equippedSkills = $char->equipment_skills ?: $defaultSkill;
+        $equippedSkills = $char->equipment_skills !== null ? (string) $char->equipment_skills : $defaultSkill;
 
         // Populate Talent Skills String
         $talents = CharacterTalent::where('character_id', $targetId)->get();

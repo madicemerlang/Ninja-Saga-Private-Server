@@ -35,7 +35,10 @@ class LeaderboardService
     private const ENERGY_MAX     = 10;
     private const TOP_LIMIT      = 100;
     private const CATEGORIES     = [
-        ['christmas_2025', 'Battle Rankings'],
+        ['level', 'Top Level'],
+        ['rank', 'Top Rank'],
+        ['gold', 'Top Gold'],
+        ['christmas_2025', 'Event Battles'],
     ];
 
     /**
@@ -48,40 +51,88 @@ class LeaderboardService
 
         Log::info("AMF LeaderboardService.getData: Char $charId Category $category");
 
-        // Use the selected category or default to the first one
-        $eventKey = $category ?? self::CATEGORIES[0][0];
-
-        // Retrieve top characters by event battle count
-        $topEntries = CharacterEventData::where('event_key', $eventKey)
-            ->where('battles', '>', 0)
-            ->orderByDesc('battles')
-            ->limit(self::TOP_LIMIT)
-            ->get();
+        // Use the selected category or default to top level
+        $eventKey = $category ?: 'level';
 
         $data = [];
-        foreach ($topEntries as $entry) {
-            $char = Character::find($entry->character_id);
-            if (!$char) continue;
+        $title = 'Shinobi Leaderboard';
+        $killText = 'Level';
 
-            $genderSuffix = $char->gender == 0 ? '_0' : '_1';
-            if (is_numeric($char->hair_style)) {
-                $hairStyle = 'hair_' . str_pad($char->hair_style, 2, '0', STR_PAD_LEFT) . $genderSuffix;
+        if (in_array($eventKey, ['level', 'rank', 'gold'], true)) {
+            $query = Character::query();
+            if ($eventKey === 'level') {
+                $query->orderByDesc('level')->orderByDesc('xp');
+                $title = 'Shinobi Level Leaderboard';
+                $killText = 'Level';
+            } elseif ($eventKey === 'rank') {
+                $query->orderByDesc('rank')->orderByDesc('level');
+                $title = 'Shinobi Rank Leaderboard';
+                $killText = 'Rank';
             } else {
-                $hairStyle = $char->hair_style ?: ('hair_01' . $genderSuffix);
+                $query->orderByDesc('gold')->orderByDesc('level');
+                $title = 'Wealthiest Shinobi';
+                $killText = 'Gold';
             }
 
-            $data[] = [
-                'char_id' => (int) $char->id,
-                'name'    => $char->name,
-                'kill'    => (int) $entry->battles,
-                'rank'    => (int) $char->rank,
-                'sets'    => [
-                    'hair_style'  => $hairStyle,
-                    'face'        => 'face_01' . $genderSuffix,
-                    'hair_color'  => $char->hair_color ?? '0|0',
-                    'skin_color'  => $char->skin_color ?? 'null|null',
-                ],
-            ];
+            foreach ($query->limit(self::TOP_LIMIT)->get() as $char) {
+                $genderSuffix = $char->gender == 0 ? '_0' : '_1';
+                $hairStyle = is_numeric($char->hair_style)
+                    ? 'hair_' . str_pad($char->hair_style, 2, '0', STR_PAD_LEFT) . $genderSuffix
+                    : ($char->hair_style ?: ('hair_01' . $genderSuffix));
+
+                $score = $eventKey === 'level'
+                    ? (int) $char->level
+                    : ($eventKey === 'rank' ? (int) $char->rank : (int) $char->gold);
+
+                $data[] = [
+                    'char_id' => (int) $char->id,
+                    'name'    => $char->name,
+                    'level'   => (int) $char->level,
+                    'kill'    => $score,
+                    'rank'    => (int) $char->rank,
+                    'sets'    => [
+                        'hair_style'  => $hairStyle,
+                        'face'        => 'face_01' . $genderSuffix,
+                        'hair_color'  => $char->hair_color ?? '0|0',
+                        'skin_color'  => $char->skin_color ?? 'null|null',
+                    ],
+                ];
+            }
+        } else {
+            $title = 'Event Battle Leaderboard';
+            $killText = 'Battles Won';
+            // Retrieve top characters by event battle count
+            $topEntries = CharacterEventData::where('event_key', $eventKey)
+                ->where('battles', '>', 0)
+                ->orderByDesc('battles')
+                ->limit(self::TOP_LIMIT)
+                ->get();
+
+            foreach ($topEntries as $entry) {
+                $char = Character::find($entry->character_id);
+                if (!$char) continue;
+
+                $genderSuffix = $char->gender == 0 ? '_0' : '_1';
+                if (is_numeric($char->hair_style)) {
+                    $hairStyle = 'hair_' . str_pad($char->hair_style, 2, '0', STR_PAD_LEFT) . $genderSuffix;
+                } else {
+                    $hairStyle = $char->hair_style ?: ('hair_01' . $genderSuffix);
+                }
+
+                $data[] = [
+                    'char_id' => (int) $char->id,
+                    'name'    => $char->name,
+                    'level'   => (int) $char->level,
+                    'kill'    => (int) $entry->battles,
+                    'rank'    => (int) $char->rank,
+                    'sets'    => [
+                        'hair_style'  => $hairStyle,
+                        'face'        => 'face_01' . $genderSuffix,
+                        'hair_color'  => $char->hair_color ?? '0|0',
+                        'skin_color'  => $char->skin_color ?? 'null|null',
+                    ],
+                ];
+            }
         }
 
         // Load reward configuration from the active ChristmasMenu GameEvent
@@ -90,8 +141,8 @@ class LeaderboardService
         return [
             'status'     => 1,
             'error'      => 0,
-            'title'      => 'Eternal Winter Leaderboard',
-            'kill_text'  => 'Battles Won',
+            'title'      => $title,
+            'kill_text'  => $killText,
             'freeze'     => null,
             'categories' => self::CATEGORIES,
             'data'       => $data,

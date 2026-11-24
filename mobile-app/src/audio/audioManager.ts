@@ -28,7 +28,31 @@ try {
 
 let bgmPlayer: AudioPlayerLike | null = null;
 let currentBgmUrl: string | null = null;
+let lastRequestedBgmUrl: string | null = null;
 let clickPlayer: AudioPlayerLike | null = null;
+let bgmMuted = false;
+let sfxMuted = false;
+
+export function isBgmMuted(): boolean {
+  return bgmMuted;
+}
+
+export function isSfxMuted(): boolean {
+  return sfxMuted;
+}
+
+export function setBgmMuted(muted: boolean): void {
+  bgmMuted = muted;
+  if (muted) {
+    void stopBgm();
+  } else if (lastRequestedBgmUrl) {
+    void playBgm(lastRequestedBgmUrl);
+  }
+}
+
+export function setSfxMuted(muted: boolean): void {
+  sfxMuted = muted;
+}
 
 /**
  * Plays background music in a loop.
@@ -36,7 +60,9 @@ let clickPlayer: AudioPlayerLike | null = null;
  * it fails gracefully without crashing the app.
  */
 export async function playBgm(url: string, volume = 0.5): Promise<void> {
-  if (!url || !ExpoAudio) return;
+  if (!url) return;
+  lastRequestedBgmUrl = url;
+  if (bgmMuted || !ExpoAudio) return;
   if (url === currentBgmUrl && bgmPlayer?.playing) return;
 
   try {
@@ -75,7 +101,7 @@ export async function stopBgm(): Promise<void> {
  * Plays the UI button click sound effect.
  */
 export async function playClickSfx(baseUrl: string, volume = 0.6): Promise<void> {
-  if (!baseUrl || !ExpoAudio) return;
+  if (!baseUrl || sfxMuted || !ExpoAudio) return;
   const url = buildAudioUrl(baseUrl, 'click.mp3');
 
   try {

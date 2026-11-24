@@ -805,14 +805,4 @@ return array (
     'gold' => 10000000,
     'tokens' => 9999,
   ),
-  'wpn_165' => 
-  array (
-    'req_weapon' => 'wpn_01',
-    'mats' => 
-    array (
-      'material_01' => 1,
-    ),
-    'gold' => 123,
-    'tokens' => 1000,
-  ),
 );

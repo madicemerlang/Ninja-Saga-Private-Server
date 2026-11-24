@@ -42,6 +42,15 @@ class QueryService
         $petList = [];
         foreach ($pets as $p) {
             $config = \App\Models\Pet::where('pet_id', $p->pet_id)->first();
+            if (!$config && is_numeric($p->pet_id)) {
+                $config = \App\Models\Pet::find((int) $p->pet_id);
+            }
+            if (!$config && !empty($p->name)) {
+                $config = \App\Models\Pet::where('name', $p->name)->first();
+            }
+            $resolvedSwf = ($config && !empty($config->swf))
+                ? $config->swf
+                : (($config && !empty($config->pet_id)) ? $config->pet_id : $p->pet_id);
             $petList[] = [
                 'pet' => $p->id,
                 'char_id' => $charId,
@@ -51,7 +60,7 @@ class QueryService
                 'pet_level' => $p->level,
                 'pet_skills' => !empty($p->learned_skills) ? $p->learned_skills : '1,0,0,0,0,0',
                 'pet_mp' => (int) $p->maturity_points,
-                'pet_swf' => $p->pet_id // Type ID for SWF loading
+                'pet_swf' => $resolvedSwf // Resolved SWF filename (handles legacy numeric pet_id rows like Easa)
             ];
         }
 

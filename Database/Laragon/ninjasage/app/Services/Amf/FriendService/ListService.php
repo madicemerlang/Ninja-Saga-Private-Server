@@ -127,8 +127,8 @@ class ListService
             return $this->friends($charId, $sessionKey, 1);
         }
 
-        $friendIds = CharacterFriend::where('character_id', $charId)->pluck('friend_id')->toArray();
-        $friendQuery = Character::with('user')->whereIn('id', $friendIds);
+        // Search across ALL shinobi characters (excluding self) so Find Shinobi discovers players to add!
+        $friendQuery = Character::with('user')->where('id', '!=', (int)$charId);
 
         if (is_numeric($search)) {
             $friendQuery->where('id', (int)$search);

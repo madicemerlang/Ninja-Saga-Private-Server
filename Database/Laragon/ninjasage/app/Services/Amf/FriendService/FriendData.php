@@ -36,6 +36,7 @@ class FriendData
                 'face' => 'face_01' . $genderSuffix,
                 'hair_color' => $friend->hair_color ?: '0|0',
                 'skin_color' => $friend->skin_color ?: '0|0',
+                'skills' => $friend->equipment_skills ?: 'skill_01',
             ],
         ];
     }

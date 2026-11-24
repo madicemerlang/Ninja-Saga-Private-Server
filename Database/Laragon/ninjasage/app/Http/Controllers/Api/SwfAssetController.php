@@ -141,7 +141,9 @@ class SwfAssetController extends Controller
         $stem = pathinfo($path, PATHINFO_FILENAME);
 
         if (!$rawMode && in_array($category, ['enemy', 'npcs', 'pets'], true)) {
-            $cached = $this->compileEntitySwf($path, "{$category}_{$stem}_{$anim}.swf", $anim);
+            $isPreview = in_array($category, ['pets', 'enemy'], true);
+            $cacheFile = $isPreview ? "{$category}_{$stem}_{$anim}_preview_v3.swf" : "{$category}_{$stem}_{$anim}.swf";
+            $cached = $this->compileEntitySwf($path, $cacheFile, $anim, $isPreview);
             if ($cached) {
                 $path = $cached;
             }
@@ -217,7 +219,7 @@ class SwfAssetController extends Controller
         }
 
         $csv = implode(',', $ids);
-        $hash = substr(md5("{$category}|{$csv}|v2"), 0, 12);
+        $hash = substr(md5("{$category}|{$csv}|v10_hd"), 0, 12);
         $cachedPath = $cacheDir . DIRECTORY_SEPARATOR . "icons_{$category}_{$hash}.swf";
 
         if (!is_file($cachedPath)) {
@@ -290,7 +292,7 @@ class SwfAssetController extends Controller
 
         $hairColor = preg_replace('/[^0-9|]/', '', (string) ($request->query('hair_color') ?: $char?->hair_color ?: '0|0')) ?? '0|0';
         $modeTag = $portraitMode ? 'portrait' : $bgName;
-        $equipHash = substr(md5("{$gender}|{$hair}|{$hairColor}|{$clothing}|{$weapon}|{$back}|{$modeTag}|v25"), 0, 12);
+        $equipHash = substr(md5("{$gender}|{$hair}|{$hairColor}|{$clothing}|{$weapon}|{$back}|{$modeTag}|v29"), 0, 12);
         $cacheDir = storage_path('app/swf_cache');
         if (!is_dir($cacheDir)) {
             @mkdir($cacheDir, 0775, true);
@@ -414,6 +416,69 @@ class SwfAssetController extends Controller
             }
         }
 
+        // Resolve optional recruited allies (up to 2 NPC or Friend IDs, comma-separated)
+        $rawAllies = (string) $request->query('allies', '');
+        $allyParts = array_slice(array_filter(array_map(function ($item) {
+            return preg_replace('/[^a-zA-Z0-9_-]/', '', trim($item));
+        }, explode(',', $rawAllies))), 0, 2);
+
+        $allyPaths = [];
+        $allySkillsSpecs = [];
+        foreach ($allyParts as $aid) {
+            if (preg_match('/^(?:friend|char|p)_?(\d+)$/i', $aid, $fm)) {
+                $frCharId = (int) $fm[1];
+                $frChar = Character::find($frCharId);
+                $frGender = (int) ($frChar?->gender ?? 0);
+                $frGSuffix = $frGender === 0 ? '_0' : '_1';
+                $frHair = (string) ($frChar?->hair_style ?: "hair_01{$frGSuffix}");
+                $frClothing = (string) ($frChar?->equipment_clothing ?: "set_01{$frGSuffix}");
+                $frWeapon = (string) ($frChar?->equipment_weapon ?: 'wpn_01');
+                $frBack = (string) ($frChar?->equipment_back ?: '');
+                $frHairColor = (string) ($frChar?->hair_color ?: '0|0');
+                $frSkillsRaw = (string) ($frChar?->equipment_skills ?: 'skill_01');
+                $frSkillsList = array_slice(array_filter(array_map(function ($s) {
+                    return preg_replace('/[^a-zA-Z0-9_-]/', '', trim($s));
+                }, explode(',', $frSkillsRaw))), 0, 6);
+                $frHash = substr(md5("{$frGender}|{$frHair}|{$frHairColor}|{$frClothing}|{$frWeapon}|{$frBack}"), 0, 10);
+                $frPlayerSwf = $cacheDir . DIRECTORY_SEPARATOR . "player_ally_{$frCharId}_{$frHash}.swf";
+
+                if (!is_file($frPlayerSwf)) {
+                    $cmdFr = sprintf(
+                        'python3 %s build-player %s %s %s standby %d %s %s %s %s %s 2>&1',
+                        escapeshellarg($script),
+                        escapeshellarg($baseSwf),
+                        escapeshellarg($itemsDir),
+                        escapeshellarg($frPlayerSwf),
+                        $frGender,
+                        escapeshellarg($frHair),
+                        escapeshellarg($frClothing),
+                        escapeshellarg($frWeapon),
+                        escapeshellarg($frBack),
+                        escapeshellarg($frHairColor)
+                    );
+                    shell_exec($cmdFr);
+                }
+
+                if (is_file($frPlayerSwf)) {
+                    $allyPaths[] = $frPlayerSwf;
+                    $allySkillsSpecs[] = !empty($frSkillsList) ? implode('+', $frSkillsList) : 'none';
+                    continue;
+                }
+            }
+
+            $np = $this->basePath() . DIRECTORY_SEPARATOR . 'npcs' . DIRECTORY_SEPARATOR . $aid . '.swf';
+            if (!is_file($np)) {
+                $np = $this->basePath() . DIRECTORY_SEPARATOR . 'npcs' . DIRECTORY_SEPARATOR . 'npc_3.swf';
+            }
+            if (is_file($np)) {
+                $allyPaths[] = $np;
+                $allySkillsSpecs[] = 'none';
+            }
+        }
+        $alliesKey = implode('_', $allyParts);
+        $allyPathsCsv = implode(',', $allyPaths);
+        $allySkillsCsv = implode(',', $allySkillsSpecs);
+
         $baseSwf = storage_path('app/swf_base/player_base.swf');
         $script = base_path('scripts/swf_builder.py');
         $itemsDir = $this->basePath() . DIRECTORY_SEPARATOR . 'items';
@@ -432,7 +497,7 @@ class SwfAssetController extends Controller
             }
         }
 
-        $hash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}|{$skillsCsv}|{$bgName}|v18"), 0, 12);
+        $hash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}|{$skillsCsv}|{$bgName}|{$alliesKey}|{$allySkillsCsv}|v37_36fps_friendskills"), 0, 12);
         $cacheDir = storage_path('app/swf_cache');
         if (!is_dir($cacheDir)) {
             @mkdir($cacheDir, 0775, true);
@@ -441,7 +506,7 @@ class SwfAssetController extends Controller
 
         if (!is_file($cachedPath)) {
             $cmd = sprintf(
-                'python3 %s build-battle %s %s %s %s %s %d %s %s %s %s %s %s 2>&1',
+                'python3 %s build-battle %s %s %s %s %s %d %s %s %s %s %s %s %s %s 2>&1',
                 escapeshellarg($script),
                 escapeshellarg($baseSwf),
                 escapeshellarg($itemsDir),
@@ -454,7 +519,9 @@ class SwfAssetController extends Controller
                 escapeshellarg($weapon),
                 escapeshellarg($back),
                 escapeshellarg($skillsCsv),
-                escapeshellarg($bgPath)
+                escapeshellarg($bgPath),
+                escapeshellarg($allyPathsCsv),
+                escapeshellarg($allySkillsCsv)
             );
             shell_exec($cmd);
         }
@@ -611,13 +678,13 @@ class SwfAssetController extends Controller
         $rawSkills = (string) $request->query('skills', 'skill_01');
         $cleanList = array_slice(array_filter(array_map(function ($s) {
             return preg_replace('/[^a-zA-Z0-9_-]/', '', trim($s));
-        }, explode(',', $rawSkills))), 0, 6);
+        }, explode(',', $rawSkills))), 0, 8);
 
         if (empty($cleanList)) {
             $cleanList = ['skill_01'];
         }
         $skillsCsv = implode(',', $cleanList);
-        $hash = substr(md5($skillsCsv . '|v21'), 0, 12);
+        $hash = substr(md5($skillsCsv . '|v25_hd'), 0, 12);
 
         $cacheDir = storage_path('app/swf_cache');
         if (!is_dir($cacheDir)) {
@@ -649,7 +716,7 @@ class SwfAssetController extends Controller
         ]);
     }
 
-    private function compileEntitySwf(string $inputPath, string $cacheName, string $anim): ?string
+    private function compileEntitySwf(string $inputPath, string $cacheName, string $anim, bool $preview = false): ?string
     {
         $script = base_path('scripts/swf_builder.py');
         if (!is_file($script)) {
@@ -662,11 +729,12 @@ class SwfAssetController extends Controller
         $cachedPath = $cacheDir . DIRECTORY_SEPARATOR . $cacheName;
         if (!is_file($cachedPath)) {
             $cmd = sprintf(
-                'python3 %s build-entity %s %s %s 2>&1',
+                'python3 %s build-entity %s %s %s%s 2>&1',
                 escapeshellarg($script),
                 escapeshellarg($inputPath),
                 escapeshellarg($cachedPath),
-                escapeshellarg($anim)
+                escapeshellarg($anim),
+                $preview ? ' preview' : ''
             );
             shell_exec($cmd);
         }

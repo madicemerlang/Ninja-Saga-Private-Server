@@ -6,8 +6,13 @@
  *  3. WebAssembly.Memory probe to report Ruffle WASM heap usage back to React Native
  *  4. ExternalInterface hooks (__pollCmd, __onHit, __onDone) for zero-reload Single-SWF 36 FPS Battle choreography
  */
-export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
+export function buildRuffleStageHtml(
+  ruffleScriptUrl: string,
+  quality: 'low' | 'medium' | 'high' = 'high'
+): string {
   const safeRuffleUrl = ruffleScriptUrl.replace(/"/g, '&quot;');
+  // Ninja Horizon mobile GPU DPR cap: prevents 2x-4x overdraw fill-rate lag on high-DPI Android screens
+  const dprCap = quality === 'low' ? 1.0 : quality === 'medium' ? 1.2 : 1.35;
 
   return `<!doctype html>
 <html>
@@ -32,11 +37,16 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
       align-items: center;
       justify-content: center;
       background: transparent;
+      transform: translateZ(0);
+      will-change: transform;
+      backface-visibility: hidden;
     }
     ruffle-player {
       width: 100%;
       height: 100%;
       background: transparent !important;
+      transform: translateZ(0);
+      will-change: transform;
     }
   </style>
   <script>
@@ -50,7 +60,7 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
           });
         } catch (e) {}
       }
-    })(1.85);
+    })(${dprCap});
 
     (function () {
       var RN = window.ReactNativeWebView;
@@ -87,6 +97,7 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
       var held = false;
       var clock = 0;
       var lastRealTs = null;
+      var smoothedDt = 16.67;
       var speedMult = 1;
 
       function flushQueue() {
@@ -109,17 +120,22 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
           if (lastRealTs === null) {
             lastRealTs = ts;
             if (ts > clock) clock = ts;
-          } else {
-            var dt = Math.max(0, Math.min(100, ts - lastRealTs));
+          } else if (speedMult <= 1) {
+            // Ninja Horizon exact VSync-locked clock: never runs backwards, zero drift vs display VSync!
             lastRealTs = ts;
-            clock += dt * speedMult;
+            if (ts > clock) clock = ts;
+          } else {
+            var rawDt = Math.max(0, Math.min(34, ts - lastRealTs));
+            lastRealTs = ts;
+            clock += rawDt * speedMult;
           }
           if (!held) flushQueue();
         });
       }
 
       window.__setSpeed = function (mult) {
-        speedMult = mult >= 2 ? 2 : 1;
+        var m = Number(mult);
+        speedMult = (isFinite(m) && m > 1) ? Math.min(3, m) : 1;
       };
 
       if (origRaf) {
@@ -195,7 +211,8 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
       backgroundColor: null,
       letterbox: 'off',
       scale: 'noBorder',
-      quality: 'medium',
+      preferredRenderer: 'webgl',
+      quality: '${quality}',
       allowScriptAccess: true,
       logLevel: 'error'
     };
@@ -210,6 +227,103 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
       var stageEl = document.getElementById('stage');
       var currentPlayer = null;
       var swfByteCache = {};
+      var iconQueue = [];
+      var iconBusy = false;
+
+      async function drainIconQueue() {
+        if (iconBusy) return;
+        iconBusy = true;
+        while (iconQueue.length > 0) {
+          var job = iconQueue.shift();
+          if (!job || !window.RufflePlayer || !job.skillIds || job.skillIds.length === 0) continue;
+          var count = Math.min(12, job.skillIds.length);
+          var cell = 128;
+          var host = document.createElement('div');
+          host.style.position = 'fixed';
+          host.style.left = '0px';
+          host.style.top = '0px';
+          host.style.width = (count * cell) + 'px';
+          host.style.height = cell + 'px';
+          host.style.opacity = '0.01';
+          host.style.zIndex = '-1';
+          host.style.pointerEvents = 'none';
+          document.body.appendChild(host);
+          try {
+            var ruffle = window.RufflePlayer.newest();
+            var iconPlayer = ruffle.createPlayer();
+            iconPlayer.style.width = (count * cell) + 'px';
+            iconPlayer.style.height = cell + 'px';
+            host.appendChild(iconPlayer);
+            var iconBytes = await getSwfBytes(job.url);
+            await iconPlayer.load({
+              data: iconBytes.slice(0),
+              swfFileName: 'skill_icons.swf',
+              preferredRenderer: 'canvas',
+              wmode: 'transparent',
+              backgroundColor: null,
+              quality: 'best',
+              scale: 'exactFit',
+              letterbox: 'off',
+              autoplay: 'on',
+              splashScreen: false,
+              unmuteOverlay: 'hidden',
+              contextMenu: 'off'
+            });
+            var waitTick = function () {
+              return new Promise(function (resolve) {
+                setTimeout(resolve, 45);
+              });
+            };
+            var sliceCanvas = document.createElement('canvas');
+            sliceCanvas.width = cell;
+            sliceCanvas.height = cell;
+            var ctx = sliceCanvas.getContext('2d');
+            if (ctx) {
+              ctx.imageSmoothingEnabled = true;
+              ctx.imageSmoothingQuality = 'high';
+            }
+            var captured = false;
+            for (var attempt = 0; attempt < 32 && !captured; attempt++) {
+              await waitTick();
+              var srcCanvas = iconPlayer.shadowRoot && iconPlayer.shadowRoot.querySelector('canvas');
+              if (!srcCanvas || srcCanvas.width <= 0 || srcCanvas.height <= 0) continue;
+              var srcCellW = srcCanvas.width / count;
+              var srcCellH = srcCanvas.height;
+              var nonZero = 0;
+              for (var probe = 0; probe < count && nonZero === 0; probe++) {
+                ctx.clearRect(0, 0, cell, cell);
+                ctx.drawImage(srcCanvas, probe * srcCellW, 0, srcCellW, srcCellH, 0, 0, cell, cell);
+                var imgData = ctx.getImageData(0, 0, cell, cell).data;
+                for (var px = 3; px < imgData.length; px += 16) {
+                  if (imgData[px] > 10) { nonZero++; break; }
+                }
+              }
+              if (nonZero > 0) {
+                var outIcons = {};
+                for (var idx = 0; idx < count; idx++) {
+                  ctx.clearRect(0, 0, cell, cell);
+                  ctx.drawImage(srcCanvas, idx * srcCellW, 0, srcCellW, srcCellH, 0, 0, cell, cell);
+                  var cellData = ctx.getImageData(0, 0, cell, cell).data;
+                  var hasPx = false;
+                  for (var cpx = 3; cpx < cellData.length; cpx += 16) {
+                    if (cellData[cpx] > 10) { hasPx = true; break; }
+                  }
+                  if (hasPx) {
+                    outIcons[job.skillIds[idx]] = sliceCanvas.toDataURL('image/png');
+                  }
+                }
+                post({ type: 'SKILL_ICONS', icons: outIcons });
+                captured = true;
+              }
+            }
+          } catch (iconErr) {
+            // Silent fallback to elemental crest icons
+          } finally {
+            try { host.remove(); } catch (e) {}
+          }
+        }
+        iconBusy = false;
+      }
 
       async function getSwfBytes(url) {
         if (swfByteCache[url]) {
@@ -237,6 +351,10 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
         var player = ruffle.createPlayer();
         player.style.width = '100%';
         player.style.height = '100%';
+        player.addEventListener('webglcontextlost', function (ev) {
+          try { ev.preventDefault(); } catch (e) {}
+          post({ type: 'STAGE_ERROR', message: 'WebGL context lost — recovering' });
+        });
         stageEl.appendChild(player);
         currentPlayer = player;
         return player;
@@ -281,7 +399,8 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
               allowScriptAccess: true,
               wmode: 'transparent',
               backgroundColor: null,
-              quality: 'medium'
+              preferredRenderer: 'webgl',
+              quality: '${quality}'
             });
             window.__reportMemory();
             post({ type: 'STAGE_READY', url: cmd.url });
@@ -290,78 +409,8 @@ export function buildRuffleStageHtml(ruffleScriptUrl: string): string {
 
           if (cmd.type === 'CAPTURE_SKILL_ICONS' && cmd.url && Array.isArray(cmd.skillIds)) {
             if (!window.RufflePlayer || cmd.skillIds.length === 0) return;
-            var count = Math.min(6, cmd.skillIds.length);
-            var cell = 64;
-            var host = document.createElement('div');
-            host.style.position = 'fixed';
-            host.style.left = '0px';
-            host.style.top = '0px';
-            host.style.width = (count * cell) + 'px';
-            host.style.height = cell + 'px';
-            host.style.opacity = '0.01';
-            host.style.zIndex = '-1';
-            host.style.pointerEvents = 'none';
-            document.body.appendChild(host);
-            try {
-              var ruffle = window.RufflePlayer.newest();
-              var iconPlayer = ruffle.createPlayer();
-              iconPlayer.style.width = (count * cell) + 'px';
-              iconPlayer.style.height = cell + 'px';
-              host.appendChild(iconPlayer);
-              var iconBytes = await getSwfBytes(cmd.url);
-              await iconPlayer.load({
-                data: iconBytes.slice(0),
-                swfFileName: 'skill_icons.swf',
-                preferredRenderer: 'canvas',
-                wmode: 'transparent',
-                backgroundColor: null,
-                quality: 'high',
-                scale: 'exactFit',
-                letterbox: 'off',
-                autoplay: 'on',
-                splashScreen: false,
-                unmuteOverlay: 'hidden',
-                contextMenu: 'off'
-              });
-              var waitTick = function () {
-                return new Promise(function (resolve) {
-                  setTimeout(resolve, 45);
-                });
-              };
-              var sliceCanvas = document.createElement('canvas');
-              sliceCanvas.width = cell;
-              sliceCanvas.height = cell;
-              var ctx = sliceCanvas.getContext('2d');
-              var captured = false;
-              for (var attempt = 0; attempt < 18 && !captured; attempt++) {
-                await waitTick();
-                var srcCanvas = iconPlayer.shadowRoot && iconPlayer.shadowRoot.querySelector('canvas');
-                if (!srcCanvas || srcCanvas.width <= 0 || srcCanvas.height <= 0) continue;
-                var srcCellW = srcCanvas.width / count;
-                var srcCellH = srcCanvas.height;
-                ctx.clearRect(0, 0, cell, cell);
-                ctx.drawImage(srcCanvas, 0, 0, srcCellW, srcCellH, 0, 0, cell, cell);
-                var imgData = ctx.getImageData(0, 0, cell, cell).data;
-                var nonZero = 0;
-                for (var px = 3; px < imgData.length; px += 16) {
-                  if (imgData[px] > 10) { nonZero++; break; }
-                }
-                if (nonZero > 0) {
-                  var outIcons = {};
-                  for (var idx = 0; idx < count; idx++) {
-                    ctx.clearRect(0, 0, cell, cell);
-                    ctx.drawImage(srcCanvas, idx * srcCellW, 0, srcCellW, srcCellH, 0, 0, cell, cell);
-                    outIcons[cmd.skillIds[idx]] = sliceCanvas.toDataURL('image/png');
-                  }
-                  post({ type: 'SKILL_ICONS', icons: outIcons });
-                  captured = true;
-                }
-              }
-            } catch (iconErr) {
-              // Silent fallback to elemental crest icons
-            } finally {
-              try { host.remove(); } catch (e) {}
-            }
+            iconQueue.push({ url: cmd.url, skillIds: cmd.skillIds });
+            drainIconQueue();
             return;
           }
 

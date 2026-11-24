@@ -77,21 +77,6 @@ class StageService
             }
 
             $char->chunin_exam_progress = implode(',', $progress);
-
-            // Auto-promote if all stages are completed (status "2")
-            $allCompleted = true;
-            foreach ($progress as $p) {
-                if ($p !== "2") {
-                    $allCompleted = false;
-                    break;
-                }
-            }
-
-            if ($allCompleted && $char->rank < 3) {
-                $char->rank = 3;
-                Log::info("Chunin Auto-Promotion for Char $charId after Stage $stageIndex");
-            }
-
             $char->save();
         }
 

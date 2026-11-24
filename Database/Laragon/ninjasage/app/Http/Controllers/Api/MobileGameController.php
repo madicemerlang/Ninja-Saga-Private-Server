@@ -98,6 +98,9 @@ class MobileGameController extends Controller
                     : 0;
                 $data['next_level_xp'] = $nextXp;
                 $data['prev_level_xp'] = $prevXp;
+                $data['senjutsu_type'] = $char->senjutsu_type;
+                $data['character_ss'] = (int) ($char->ss ?? 0);
+                $data['senjutsu_skills'] = (string) ($char->senjutsu_skills ?? '');
             }
             $user = $char ? \App\Models\User::find($char->user_id) : null;
             if ($user) {
@@ -331,6 +334,7 @@ class MobileGameController extends Controller
             'mission_id' => ['required', 'string'],
             'token' => ['required', 'string'],
             'victory' => ['required', 'boolean'],
+            'used_items' => ['nullable', 'array'],
         ]);
 
         $cached = Cache::get("mobile_battle_{$charId}");
@@ -343,6 +347,29 @@ class MobileGameController extends Controller
         $char = Character::find($charId);
         if (!$char) {
             return response()->json(['status' => 0, 'error' => 'Character not found'], 404);
+        }
+
+        // Persist any consumable items used during this battle (applies to victory, defeat, and forfeit!)
+        $usedItems = $validated['used_items'] ?? [];
+        if (is_array($usedItems) && !empty($usedItems)) {
+            foreach ($usedItems as $rawItemId => $rawQty) {
+                $itemId = preg_replace('/[^a-zA-Z0-9_-]/', '', (string) $rawItemId);
+                $qty = max(0, (int) $rawQty);
+                if (!$itemId || $qty <= 0) {
+                    continue;
+                }
+                $row = CharacterItem::where('character_id', $char->id)
+                    ->where('item_id', $itemId)
+                    ->where('category', 'item')
+                    ->first();
+                if ($row) {
+                    if ($row->quantity <= $qty) {
+                        $row->delete();
+                    } else {
+                        $row->decrement('quantity', $qty);
+                    }
+                }
+            }
         }
 
         if (!$validated['victory']) {
@@ -373,12 +400,50 @@ class MobileGameController extends Controller
         $levelUp = $char->addXp($xpReward);
         $char->save();
 
+        $droppedItems = [];
         if ($huntingBadges > 0) {
             $mat = CharacterItem::firstOrCreate(
                 ['character_id' => $char->id, 'item_id' => 'material_509', 'category' => 'material'],
                 ['quantity' => 0]
             );
             $mat->increment('quantity', $huntingBadges);
+            $droppedItems[] = "material_509:{$huntingBadges}";
+
+            // Authentic Hunting House Magatama + Boss Weapon drops per zone
+            $zoneNum = 1;
+            if (preg_match('/hunting_zone_(\d+)/', (string) ($cached['mission_id'] ?? ''), $zm)) {
+                $zoneNum = max(1, min(5, (int) $zm[1]));
+            }
+            $zoneLoot = [
+                1 => ['magatama' => 'material_01', 'weapon' => 'wpn_82'],
+                2 => ['magatama' => 'material_02', 'weapon' => 'wpn_83'],
+                3 => ['magatama' => 'material_03', 'weapon' => 'wpn_84'],
+                4 => ['magatama' => 'material_04', 'weapon' => 'wpn_85'],
+                5 => ['magatama' => 'material_06', 'weapon' => 'wpn_86'],
+            ][$zoneNum];
+
+            $magRow = CharacterItem::firstOrCreate(
+                ['character_id' => $char->id, 'item_id' => $zoneLoot['magatama'], 'category' => 'material'],
+                ['quantity' => 0]
+            );
+            $magRow->increment('quantity', 1);
+            $droppedItems[] = $zoneLoot['magatama'] . ':1';
+
+            // 25% chance to drop zone Boss Weapon if not already owned
+            if (random_int(1, 100) <= 25) {
+                $hasWpn = CharacterItem::where('character_id', $char->id)
+                    ->where('item_id', $zoneLoot['weapon'])
+                    ->exists();
+                if (!$hasWpn) {
+                    CharacterItem::create([
+                        'character_id' => $char->id,
+                        'item_id' => $zoneLoot['weapon'],
+                        'category' => 'weapon',
+                        'quantity' => 1,
+                    ]);
+                    $droppedItems[] = $zoneLoot['weapon'];
+                }
+            }
         }
 
         return response()->json([
@@ -388,10 +453,13 @@ class MobileGameController extends Controller
             'gold_reward' => $goldReward,
             'premium_bonus' => $isPremium,
             'badges_reward' => $huntingBadges,
+            'dropped_items' => $droppedItems,
             'level' => (int) $char->level,
             'xp' => (int) $char->xp,
             'gold' => (int) $char->gold,
             'level_up' => (bool) $levelUp,
+            'level_capped' => $char->isLevelCapped(),
+            'cap_exam' => $char->isLevelCapped() ? $char->getNextExamName() : null,
         ]);
     }
 
@@ -421,14 +489,53 @@ class MobileGameController extends Controller
             'type' => $t->type ?? 'Secret',
         ])->values();
 
-        $petsCatalog = Pet::all()->map(fn ($p) => [
-            'pet_id' => $p->pet_id,
-            'name' => $p->name,
-            'swf' => $p->swf ?: $p->pet_id,
-            'price_gold' => (int) ($p->price_gold ?? 0),
-            'price_tokens' => (int) ($p->price_tokens ?? 0),
-            'premium' => (bool) ($p->premium ?? false),
-        ])->values();
+        $petsById = Pet::all()->keyBy('pet_id');
+        $petsCatalog = collect();
+        $gameDataPath = public_path('game_data/gamedata.json');
+        if (File::exists($gameDataPath)) {
+            $gd = json_decode(File::get($gameDataPath), true);
+            if (is_array($gd)) {
+                foreach ($gd as $section) {
+                    if (($section['id'] ?? '') === 'pet_shop' && is_array($section['data']['pets'] ?? null)) {
+                        foreach ($section['data']['pets'] as $entry) {
+                            $pid = (string) ($entry['id'] ?? '');
+                            if ($pid === '') continue;
+                            $rawPrice = (string) ($entry['price'] ?? '');
+                            $priceGold = 0;
+                            $priceTokens = 0;
+                            if (preg_match('/^(gold|token)_(\d+)(M|K)?$/i', $rawPrice, $m)) {
+                                $val = (int) $m[2];
+                                $unit = strtoupper($m[3] ?? '');
+                                if ($unit === 'M') $val *= 1000000;
+                                elseif ($unit === 'K') $val *= 1000;
+                                if (strtolower($m[1]) === 'token') $priceTokens = $val;
+                                else $priceGold = $val;
+                            }
+                            $pModel = $petsById->get($pid);
+                            $petsCatalog->push([
+                                'pet_id' => $pid,
+                                'name' => $pModel?->name ?? ucfirst(str_replace('pet_', '', $pid)),
+                                'swf' => $pModel?->swf ?: $pid,
+                                'price_gold' => $priceGold,
+                                'price_tokens' => $priceTokens,
+                                'premium' => (bool) ($pModel?->premium ?? false),
+                            ]);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if ($petsCatalog->isEmpty()) {
+            $petsCatalog = $petsById->values()->map(fn ($p) => [
+                'pet_id' => $p->pet_id,
+                'name' => $p->name,
+                'swf' => $p->swf ?: $p->pet_id,
+                'price_gold' => (int) ($p->price_gold ?? 0),
+                'price_tokens' => (int) ($p->price_tokens ?? 0),
+                'premium' => (bool) ($p->premium ?? false),
+            ])->values();
+        }
 
         return response()->json([
             'status' => 1,

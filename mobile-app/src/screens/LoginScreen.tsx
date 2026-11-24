@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -10,20 +11,47 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MobileApiClient } from '../api/client';
-import { useAuthStore } from '../store/useAuthStore';
+import { SAVED_CREDS_STORAGE_KEY, useAuthStore } from '../store/useAuthStore';
 
 const LOGIN_BG = require('../../assets/login_bg.jpg');
 
 export function LoginScreen() {
   const serverUrl = useAuthStore((s) => s.serverUrl);
   const setLoginSession = useAuthStore((s) => s.setLoginSession);
+  const rememberCredentials = useAuthStore((s) => s.rememberCredentials);
+  const savedUsername = useAuthStore((s) => s.savedUsername);
+  const savedPassword = useAuthStore((s) => s.savedPassword);
+  const setSavedCredentials = useAuthStore((s) => s.setSavedCredentials);
 
   const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [username, setUsername] = useState('admin');
+  const [username, setUsername] = useState(() => (rememberCredentials ? savedUsername : ''));
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('admin');
+  const [password, setPassword] = useState(() => (rememberCredentials ? savedPassword : ''));
+  const [remember, setRemember] = useState(() => rememberCredentials);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+
+  // Hydrate saved credentials from persistent AsyncStorage on app start / Expo Go reload
+  useEffect(() => {
+    let active = true;
+    AsyncStorage.getItem(SAVED_CREDS_STORAGE_KEY)
+      .then((raw) => {
+        if (!active || !raw) return;
+        const parsed = JSON.parse(raw) as { remember?: boolean; username?: string; password?: string };
+        if (parsed?.remember) {
+          const u = String(parsed.username ?? '');
+          const p = String(parsed.password ?? '');
+          setUsername(u);
+          setPassword(p);
+          setRemember(true);
+          setSavedCredentials(true, u, p);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [setSavedCredentials]);
 
   const api = useMemo(() => new MobileApiClient(serverUrl), [serverUrl]);
 
@@ -37,6 +65,7 @@ export function LoginScreen() {
         setMessage('Account created! Logging in...');
       }
       const res = await api.login(username.trim(), password);
+      setSavedCredentials(remember, username.trim(), password);
       setLoginSession(res);
     } catch (err) {
       setMessage(String(err instanceof Error ? err.message : err));
@@ -112,6 +141,20 @@ export function LoginScreen() {
             secureTextEntry
           />
 
+          <Pressable
+            style={styles.rememberRow}
+            onPress={() => {
+              const next = !remember;
+              setRemember(next);
+              if (!next) setSavedCredentials(false, '', '');
+            }}
+          >
+            <View style={[styles.checkbox, remember && styles.checkboxChecked]}>
+              {remember && <Text style={styles.checkboxMark}>✓</Text>}
+            </View>
+            <Text style={styles.rememberText}>Remember Username & Password</Text>
+          </Pressable>
+
           {message && <Text style={styles.errorText}>{message}</Text>}
 
           <Pressable style={styles.submitBtn} onPress={handleSubmit} disabled={loading}>
@@ -143,6 +186,38 @@ const styles = StyleSheet.create({
   scrim: {
     ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(5, 9, 18, 0.22)',
+  },
+  rememberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  checkbox: {
+    width: 18,
+    height: 18,
+    borderRadius: 4,
+    borderWidth: 1.5,
+    borderColor: '#94A3B8',
+    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkboxChecked: {
+    borderColor: '#FACC15',
+    backgroundColor: '#B45309',
+  },
+  checkboxMark: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '900',
+    lineHeight: 14,
+  },
+  rememberText: {
+    color: '#E2E8F0',
+    fontSize: 12,
+    fontWeight: '700',
   },
   content: {
     flex: 1,

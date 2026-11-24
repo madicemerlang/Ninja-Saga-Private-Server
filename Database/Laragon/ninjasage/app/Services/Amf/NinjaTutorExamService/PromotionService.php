@@ -66,28 +66,40 @@ class PromotionService
 
         // Add Rewards
         $genderSuffix = $char->gender == 0 ? '_0' : '_1';
+        $vestId = 'set_942' . $genderSuffix;
         $itemsToAward = [
             'wpn_988' => 'weapon',
-            'set_942' . $genderSuffix => 'set',
+            $vestId => 'set',
             'back_430' => 'back'
         ];
 
+        $awardedRewards = [];
         foreach ($itemsToAward as $itemId => $cat) {
-            $itemConfig = Item::where('item_id', $itemId)->first();
-            if (!$itemConfig) {
-                // Try without suffix if it has one
-                if (str_contains($itemId, '_')) {
-                    $itemIdNoSuffix = explode('_', $itemId);
-                    if (count($itemIdNoSuffix) > 1) {
-                        $itemConfig = Item::where('item_id', $itemIdNoSuffix[0] . '_' . $itemIdNoSuffix[1])->first();
+            $finalId = $itemId;
+            $itemConfig = Item::where('item_id', $finalId)->first();
+            if (!$itemConfig && str_contains($finalId, '_')) {
+                $parts = explode('_', $finalId);
+                if (count($parts) > 2) {
+                    $fallbackId = $parts[0] . '_' . $parts[1];
+                    if (Item::where('item_id', $fallbackId)->exists()) {
+                        $finalId = $fallbackId;
                     }
                 }
             }
 
-            CharacterItem::updateOrCreate(
-                ['character_id' => $charId, 'item_id' => $itemId],
-                ['quantity' => \Illuminate\Support\Facades\DB::raw('quantity + 1'), 'category' => $cat]
-            );
+            $existing = CharacterItem::where('character_id', $charId)->where('item_id', $finalId)->first();
+            if ($existing) {
+                $existing->quantity += 1;
+                $existing->save();
+            } else {
+                CharacterItem::create([
+                    'character_id' => $charId,
+                    'item_id' => $finalId,
+                    'quantity' => 1,
+                    'category' => $cat,
+                ]);
+            }
+            $awardedRewards[] = $finalId;
         }
 
         // Promote to Senior Ninja Tutor (Rank 9)
@@ -99,11 +111,7 @@ class PromotionService
         return [
             'status' => 1,
             'error' => 0,
-            'rewards' => [
-                'wpn_988',
-                'set_942_%s',
-                'back_430'
-            ],
+            'rewards' => $awardedRewards,
             'result' => 'Congratulations! You are now a Senior Ninja Tutor!'
         ];
     }

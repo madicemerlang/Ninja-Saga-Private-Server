@@ -6,7 +6,7 @@ export const DEFAULT_RUFFLE_SCRIPT_URL =
   process.env.EXPO_PUBLIC_RUFFLE_URL ??
   `${DEFAULT_API_BASE_URL}/ruffle/ruffle.js`;
 
-export const SWF_CACHE_BUSTER = 'v25';
+export const SWF_CACHE_BUSTER = 'v55';
 
 export function buildAudioUrl(baseUrl: string, filename: string): string {
   const cleanBase = normalizeBaseUrl(baseUrl);
@@ -42,6 +42,7 @@ export function buildPlayerSwfUrl(
     clothing?: string;
     back?: string;
     hair?: string;
+    hairColor?: string;
     bg?: string;
     portrait?: boolean;
   }
@@ -53,6 +54,7 @@ export function buildPlayerSwfUrl(
   if (previewOverrides?.clothing) qs.set('clothing', previewOverrides.clothing);
   if (previewOverrides?.back) qs.set('back', previewOverrides.back);
   if (previewOverrides?.hair) qs.set('hair', previewOverrides.hair);
+  if (previewOverrides?.hairColor) qs.set('hair_color', previewOverrides.hairColor);
   if (previewOverrides?.bg) qs.set('bg', previewOverrides.bg);
   if (previewOverrides?.portrait) qs.set('portrait', '1');
   return `${cleanBase}/api/v1/assets/player/${charId}.swf?${qs.toString()}`;
@@ -93,18 +95,30 @@ export function buildSkillIconsSwfUrl(baseUrl: string, skillsCsv: string): strin
   return `${cleanBase}/api/v1/assets/skill-icons.swf?${qs.toString()}`;
 }
 
+export function buildIconSheetSwfUrl(
+  baseUrl: string,
+  category: 'skills' | 'items' | 'materials' | 'consumables' | 'pets',
+  idsCsv: string
+): string {
+  const cleanBase = normalizeBaseUrl(baseUrl);
+  const qs = new URLSearchParams({ ids: idsCsv, cb: SWF_CACHE_BUSTER });
+  return `${cleanBase}/api/v1/assets/icon-sheet/${category}.swf?${qs.toString()}`;
+}
+
 export function buildBattleSwfUrl(
   baseUrl: string,
   charId: number,
   enemyId: string,
   skillsCsv: string,
   equipTag = '',
-  bg = ''
+  bg = '',
+  alliesCsv = ''
 ): string {
   const cleanBase = normalizeBaseUrl(baseUrl);
   const cleanEnemy = enemyId.replace(/\.swf$/i, '');
   const qs = new URLSearchParams({ skills: skillsCsv, cb: SWF_CACHE_BUSTER });
   if (equipTag) qs.set('v', equipTag);
   if (bg) qs.set('bg', bg.replace(/\.swf$/i, ''));
+  if (alliesCsv) qs.set('allies', alliesCsv);
   return `${cleanBase}/api/v1/assets/battle/${charId}/${encodeURIComponent(cleanEnemy)}.swf?${qs.toString()}`;
 }

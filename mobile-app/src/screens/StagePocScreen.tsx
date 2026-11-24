@@ -129,7 +129,7 @@ export function StagePocScreen() {
             <Text style={styles.title}>Ruffle SWF Lab (Landscape)</Text>
           </View>
           <Text style={styles.meta}>
-            {activeSwf ? `SWF: ${activeSwf}` : 'Pilih SWF di panel kanan'}
+            {activeSwf ? `SWF: ${activeSwf}` : 'Select an SWF on the right panel'}
             {heapMB !== null ? `  |  WASM: ${heapMB} MB` : ''}
           </Text>
         </View>
@@ -216,7 +216,7 @@ export function StagePocScreen() {
           ))}
         </View>
 
-        <ScrollView style={styles.fileList} contentContainerStyle={styles.fileListContent}>
+        <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} style={styles.fileList} contentContainerStyle={styles.fileListContent}>
           {swfFiles.map((file) => (
             <Pressable
               key={file}
@@ -227,12 +227,12 @@ export function StagePocScreen() {
             </Pressable>
           ))}
           {swfFiles.length === 0 && (
-            <Text style={styles.emptyText}>Tekan Connect atau pilih kategori untuk memuat daftar SWF.</Text>
+            <Text style={styles.emptyText}>Press Connect or select a category to load the SWF list.</Text>
           )}
         </ScrollView>
 
         <Text style={styles.sectionTitle}>4. Bridge Logs</Text>
-        <ScrollView style={styles.logBox}>
+        <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} style={styles.logBox}>
           {logs.map((l, idx) => (
             <Text key={idx} style={styles.logLine}>
               {l}

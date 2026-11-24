@@ -21,9 +21,10 @@ const BAR_Y1 = 801;
 interface LoadingScreenOverlayProps {
   visible: boolean;
   subtitle?: string;
+  progress?: number; // Optional real 0..1 progress from resource preloader
 }
 
-export function LoadingScreenOverlay({ visible, subtitle }: LoadingScreenOverlayProps) {
+export function LoadingScreenOverlay({ visible, subtitle, progress }: LoadingScreenOverlayProps) {
   const win = useWindowDimensions();
   const [size, setSize] = useState({ width: win.width, height: win.height });
   const [mounted, setMounted] = useState(visible);
@@ -78,13 +79,22 @@ export function LoadingScreenOverlay({ visible, subtitle }: LoadingScreenOverlay
     if (visible) {
       setMounted(true);
       fadeAnim.setValue(1);
-      progressAnim.setValue(0.08);
-      Animated.timing(progressAnim, {
-        toValue: 0.88,
-        duration: 2400,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: false,
-      }).start();
+      if (typeof progress === 'number') {
+        Animated.timing(progressAnim, {
+          toValue: Math.max(0.05, Math.min(1, progress)),
+          duration: 240,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: false,
+        }).start();
+      } else {
+        progressAnim.setValue(0.08);
+        Animated.timing(progressAnim, {
+          toValue: 0.88,
+          duration: 2400,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: false,
+        }).start();
+      }
     } else if (mounted) {
       Animated.sequence([
         Animated.timing(progressAnim, {
@@ -103,7 +113,7 @@ export function LoadingScreenOverlay({ visible, subtitle }: LoadingScreenOverlay
         if (finished) setMounted(false);
       });
     }
-  }, [visible, mounted, fadeAnim, progressAnim]);
+  }, [visible, progress, mounted, fadeAnim, progressAnim]);
 
   if (!mounted) return null;
 
@@ -160,8 +170,10 @@ export function LoadingScreenOverlay({ visible, subtitle }: LoadingScreenOverlay
         <Animated.Text style={[styles.spinnerGlyph, { transform: [{ rotate: spinDeg }] }]}>
           ✦
         </Animated.Text>
-        <Text style={styles.loadingText}>
-          {subtitle ? `${subtitle}${dots}` : `Loading${dots}`}
+        <Text style={styles.loadingText} numberOfLines={1}>
+          {subtitle
+            ? `${subtitle}${typeof progress === 'number' ? ` (${Math.round(progress * 100)}%)` : dots}`
+            : `Loading${dots}`}
         </Text>
       </View>
 

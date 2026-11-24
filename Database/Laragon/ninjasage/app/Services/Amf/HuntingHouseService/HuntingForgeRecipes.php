@@ -16,10 +16,6 @@
 return [
 
     // ── Weapon ──
-    'wpn_81' => [
-        'materials' => ['material_509'],
-        'qty'       => [10],
-    ],
     'wpn_82' => [
         'materials' => ['material_509'],
         'qty'       => [15],

@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { MobileApiClient, type PetCatalogItem } from '../api/client';
@@ -13,6 +13,7 @@ import { loadPetsJson, type PetJsonDef } from '../api/gameData';
 import { playClickSfx } from '../audio/audioManager';
 import { BUILDING_BGS } from '../components/BuildingSceneBackdrop';
 import { NinjaScrollWindow, NS_THEME } from '../components/NinjaScrollWindow';
+import { NinjaToast } from '../components/NinjaToast';
 import { buildSwfAssetUrl } from '../config/env';
 import { RuffleStageView, type RuffleStageHandle } from '../stage/RuffleStageView';
 import { useAuthStore } from '../store/useAuthStore';
@@ -41,15 +42,21 @@ export function PetScreen({ mode }: PetScreenProps) {
 
   const api = useMemo(() => new MobileApiClient(serverUrl), [serverUrl]);
 
-  const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!message) return;
+    const t = setTimeout(() => setMessage(null), 2000);
+    return () => clearTimeout(t);
+  }, [message]);
   const [ownedPets, setOwnedPets] = useState<OwnedPet[]>([]);
   const [selectedOwnedId, setSelectedOwnedId] = useState<number | null>(null);
+  const [confirmDeletePet, setConfirmDeletePet] = useState<OwnedPet | null>(null);
   const [catalog, setCatalog] = useState<PetCatalogItem[]>([]);
   const [petsMeta, setPetsMeta] = useState<Record<string, PetJsonDef>>({});
-  const [previewSwf, setPreviewSwf] = useState<string>('pet_jyubi');
+  const [previewSwf, setPreviewSwf] = useState<string>('');
 
   const isMyMode = mode === 'my';
 
@@ -81,6 +88,8 @@ export function PetScreen({ mode }: PetScreenProps) {
           });
         } else {
           setSelectedOwnedId(null);
+          setPreviewSwf('');
+          stageRef.current?.clearStage();
         }
       } else {
         const [feat, meta] = await Promise.all([
@@ -95,7 +104,7 @@ export function PetScreen({ mode }: PetScreenProps) {
         }
       }
     } catch (err) {
-      setMessage(`Gagal memuat Pet: ${String(err)}`);
+      setMessage(`Failed to load pets: ${String(err)}`);
     } finally {
       setLoading(false);
     }
@@ -132,11 +141,11 @@ export function PetScreen({ mode }: PetScreenProps) {
         { sessionKey, charId: profile.charId }
       );
       if (res.data?.status === 1) {
-        setMessage('Pet berhasil di-equip!');
+        setMessage('Pet equipped!');
         await refreshChar();
         await loadAll();
       } else {
-        setMessage(res.data?.result || res.data?.error || 'Gagal equip pet.');
+        setMessage(res.data?.result || res.data?.error || 'Failed to equip pet.');
       }
     } catch (err) {
       setMessage(String(err));
@@ -155,7 +164,7 @@ export function PetScreen({ mode }: PetScreenProps) {
         sessionKey,
         charId: profile.charId,
       });
-      setMessage('Pet dilepas.');
+      setMessage('Pet unequipped.');
       await refreshChar();
     } catch (err) {
       setMessage(String(err));
@@ -182,11 +191,37 @@ export function PetScreen({ mode }: PetScreenProps) {
         { sessionKey, charId: profile.charId }
       );
       if (res.data?.status === 1) {
-        setMessage(res.data.result || 'Jurus pet berhasil dipelajari!');
+        setMessage(res.data.result || 'Pet skill learned!');
         await refreshChar();
         await loadAll();
       } else {
-        setMessage(res.data?.result || res.data?.error || 'Gagal mempelajari jurus pet.');
+        setMessage(res.data?.result || res.data?.error || 'Failed to learn pet skill.');
+      }
+    } catch (err) {
+      setMessage(String(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleReleasePet = async (pet: OwnedPet) => {
+    if (!profile || !sessionKey) return;
+    playClickSfx(serverUrl);
+    setBusyId(`del-${pet.pet_id}`);
+    setMessage(null);
+    try {
+      const res = await api.rpc<{ status: number; result?: string; error?: string }>(
+        'PetService',
+        'releasePet',
+        [[profile.charId, sessionKey, pet.pet_id]],
+        { sessionKey, charId: profile.charId }
+      );
+      if (res.data?.status === 1) {
+        setMessage(`Released ${pet.pet_name}.`);
+        setConfirmDeletePet(null);
+        await Promise.all([loadAll(), refreshChar()]);
+      } else {
+        setMessage(res.data?.result || res.data?.error || 'Failed to release pet.');
       }
     } catch (err) {
       setMessage(String(err));
@@ -208,12 +243,12 @@ export function PetScreen({ mode }: PetScreenProps) {
         { sessionKey, charId: profile.charId }
       );
       if (res.data?.status === 1) {
-        setMessage(`Berhasil membeli ${pet.name}! Cek di menu Pet untuk equip & pelajari jurus.`);
+        setMessage(`Purchased ${pet.name}! Open My Pets to equip & learn skills.`);
         await refreshChar();
       } else if (res.data?.status === 6) {
-        setMessage(`${pet.name} membutuhkan Emblem / Premium.`);
+        setMessage(`${pet.name} requires Emblem / Premium.`);
       } else {
-        setMessage(res.data?.result || res.data?.error || 'Gold/Token tidak cukup.');
+        setMessage(res.data?.result || res.data?.error || 'Not enough Gold/Tokens.');
       }
     } catch (err) {
       setMessage(String(err));
@@ -222,20 +257,15 @@ export function PetScreen({ mode }: PetScreenProps) {
     }
   };
 
-  const filteredShop = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const list = q
-      ? catalog.filter((p) => p.name.toLowerCase().includes(q) || p.pet_id.toLowerCase().includes(q))
-      : catalog;
-    return list.slice(0, 80);
-  }, [catalog, search]);
+  const filteredShop = catalog;
 
   const selectedOwned = useMemo(
     () => ownedPets.find((p) => p.pet_id === selectedOwnedId) ?? ownedPets[0] ?? null,
     [ownedPets, selectedOwnedId]
   );
 
-  const selectedMeta = petsMeta[previewSwf];
+  const selectedMeta = previewSwf ? petsMeta[previewSwf] : undefined;
+  const isEmptyMyPets = isMyMode && !loading && ownedPets.length === 0;
   const learnedFlags = useMemo(() => {
     const raw = selectedOwned?.pet_skills || '1,0,0,0,0,0';
     return raw.split(',').map((v) => v.trim() === '1');
@@ -249,6 +279,24 @@ export function PetScreen({ mode }: PetScreenProps) {
         playClickSfx(serverUrl);
         navigate('hub');
       }}
+      headerCenter={
+        !isMyMode ? (
+          <View style={styles.buildingTabs}>
+            <View style={[styles.buildingTabBtn, styles.buildingTabActive]}>
+              <Text style={styles.buildingTabTxtActive}>🐾 Pet Shop</Text>
+            </View>
+            <Pressable
+              style={styles.buildingTabBtn}
+              onPress={() => {
+                playClickSfx(serverUrl);
+                navigate('petVilla');
+              }}
+            >
+              <Text style={styles.buildingTabTxt}>🏡 Pet Villa</Text>
+            </Pressable>
+          </View>
+        ) : undefined
+      }
       rightContent={
         <View style={styles.currencyPill}>
           <Text style={styles.currencyTxt}>
@@ -257,12 +305,19 @@ export function PetScreen({ mode }: PetScreenProps) {
         </View>
       }
     >
-      {message && (
-        <View style={styles.banner}>
-          <Text style={styles.bannerText}>{message}</Text>
-        </View>
-      )}
+      <NinjaToast message={message} />
 
+      {isEmptyMyPets ? (
+        <View style={styles.emptyCenter}>
+          <View style={styles.emptyPetCard}>
+            <Text style={styles.emptyPetIcon}>🐾</Text>
+            <Text style={styles.emptyPetTitle}>No Pets Yet</Text>
+            <Text style={styles.emptyPetSub}>
+              Visit the Pet Shop (requires Chunin rank) to adopt your first companion!
+            </Text>
+          </View>
+        </View>
+      ) : (
       <View style={styles.body}>
         {/* Left: Live Animated Pet SWF Preview */}
         <View style={styles.previewCard}>
@@ -275,17 +330,11 @@ export function PetScreen({ mode }: PetScreenProps) {
             <RuffleStageView ref={stageRef} baseUrl={serverUrl} />
           </View>
           {selectedMeta && (
-            <ScrollView style={styles.metaBox}>
+            <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} style={styles.metaBox}>
               <Text style={styles.metaStats}>
                 AGI {selectedMeta.agility} • DODGE {selectedMeta.dodge}% • CRIT {selectedMeta.critical}%
               </Text>
               <Text style={styles.metaDesc}>{selectedMeta.description}</Text>
-              {!isMyMode &&
-                (selectedMeta.attacks ?? []).slice(0, 6).map((atk, i) => (
-                  <Text key={i} style={styles.metaSkill}>
-                    • Lv.{atk.level} {atk.name}: {atk.description}
-                  </Text>
-                ))}
             </ScrollView>
           )}
         </View>
@@ -294,15 +343,15 @@ export function PetScreen({ mode }: PetScreenProps) {
         {isMyMode ? (
           <View style={styles.mySplitPane}>
             <View style={styles.ownedCol}>
-              <Text style={styles.sectionHeader}>Daftar Pet Dimiliki</Text>
+              <Text style={styles.sectionHeader}>Owned Pets</Text>
               {loading ? (
                 <ActivityIndicator color={NS_THEME.btnOrange} style={{ marginTop: 24 }} />
               ) : ownedPets.length === 0 ? (
                 <Text style={styles.emptyText}>
-                  Belum punya Pet. Kunjungi bangunan Pet Shop di desa untuk membeli!
+                  You have no pets yet. Visit the Pet Shop in the village to adopt one!
                 </Text>
               ) : (
-                <ScrollView contentContainerStyle={styles.scrollList}>
+                <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollList}>
                   {ownedPets.map((p) => {
                     const isEquipped = profile?.equippedPet === p.pet_id;
                     const isSelected = selectedOwned?.pet_id === p.pet_id;
@@ -323,27 +372,39 @@ export function PetScreen({ mode }: PetScreenProps) {
                             XP: {p.pet_xp} • MP: {p.pet_mp}
                           </Text>
                         </View>
-                        {isEquipped ? (
+                        <View style={styles.petRowBtns}>
+                          {isEquipped ? (
+                            <Pressable
+                              style={[styles.actBtn, { backgroundColor: '#475569' }]}
+                              disabled={busyId !== null}
+                              onPress={handleUnequip}
+                            >
+                              <Text style={styles.actBtnText}>
+                                {busyId === 'unequip' ? '...' : 'Unequip'}
+                              </Text>
+                            </Pressable>
+                          ) : (
+                            <Pressable
+                              style={styles.actBtn}
+                              disabled={busyId !== null}
+                              onPress={() => handleEquip(p.pet_id)}
+                            >
+                              <Text style={styles.actBtnText}>
+                                {busyId === `eq-${p.pet_id}` ? '...' : 'Equip'}
+                              </Text>
+                            </Pressable>
+                          )}
                           <Pressable
-                            style={[styles.actBtn, { backgroundColor: '#475569' }]}
+                            style={styles.delBtn}
                             disabled={busyId !== null}
-                            onPress={handleUnequip}
+                            onPress={() => {
+                              playClickSfx(serverUrl);
+                              setConfirmDeletePet(p);
+                            }}
                           >
-                            <Text style={styles.actBtnText}>
-                              {busyId === 'unequip' ? '...' : 'Unequip'}
-                            </Text>
+                            <Text style={styles.actBtnText}>🗑️</Text>
                           </Pressable>
-                        ) : (
-                          <Pressable
-                            style={styles.actBtn}
-                            disabled={busyId !== null}
-                            onPress={() => handleEquip(p.pet_id)}
-                          >
-                            <Text style={styles.actBtnText}>
-                              {busyId === `eq-${p.pet_id}` ? '...' : 'Equip'}
-                            </Text>
-                          </Pressable>
-                        )}
+                        </View>
                       </Pressable>
                     );
                   })}
@@ -353,12 +414,12 @@ export function PetScreen({ mode }: PetScreenProps) {
 
             <View style={styles.skillsCol}>
               <Text style={styles.sectionHeader}>
-                Jurus Pet {selectedOwned ? `— ${selectedOwned.pet_name}` : ''}
+                Pet Skills {selectedOwned ? `— ${selectedOwned.pet_name}` : ''}
               </Text>
               {!selectedOwned ? (
-                <Text style={styles.emptyText}>Pilih pet untuk melihat & mempelajari jurusnya.</Text>
+                <Text style={styles.emptyText}>Select a pet to view & learn its skills.</Text>
               ) : (
-                <ScrollView contentContainerStyle={styles.scrollList}>
+                <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollList}>
                   {(selectedMeta?.attacks ?? []).slice(0, 6).map((atk, idx) => {
                     const isLearned = learnedFlags[idx] === true;
                     const reqLevel = Math.max(1, atk.level ?? 1);
@@ -381,7 +442,7 @@ export function PetScreen({ mode }: PetScreenProps) {
                         </View>
                         {isLearned ? (
                           <View style={styles.learnedBadge}>
-                            <Text style={styles.learnedBadgeTxt}>✓ Dipelajari</Text>
+                            <Text style={styles.learnedBadgeTxt}>✓ Learned</Text>
                           </View>
                         ) : (
                           <Pressable
@@ -396,8 +457,8 @@ export function PetScreen({ mode }: PetScreenProps) {
                               {learnBusy
                                 ? '...'
                                 : canLearnLevel
-                                  ? `Pelajari (${goldCost.toLocaleString()}G)`
-                                  : `Butuh Lv.${reqLevel}`}
+                                  ? `Learn (${goldCost.toLocaleString()}G)`
+                                  : `Req. Lv.${reqLevel}`}
                             </Text>
                           </Pressable>
                         )}
@@ -409,55 +470,114 @@ export function PetScreen({ mode }: PetScreenProps) {
             </View>
           </View>
         ) : (
-          <View style={styles.listPane}>
-            <View style={styles.tabRow}>
-              <Text style={styles.sectionHeader}>Katalog Beli Pet</Text>
-              <TextInput
-                style={styles.searchInput}
-                placeholder="Cari pet..."
-                placeholderTextColor={NS_THEME.inkSoft}
-                value={search}
-                onChangeText={setSearch}
-              />
+          <View style={styles.mySplitPane}>
+            <View style={styles.ownedCol}>
+              <Text style={styles.sectionHeader}>Pet Shop ({filteredShop.length})</Text>
+              {loading ? (
+                <ActivityIndicator color={NS_THEME.btnOrange} style={{ marginTop: 24 }} />
+              ) : (
+                <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollList}>
+                  {filteredShop.map((pet) => (
+                    <Pressable
+                      key={pet.pet_id}
+                      style={[styles.rowCard, previewSwf === pet.swf && styles.rowSelected]}
+                      onPress={() => {
+                        playClickSfx(serverUrl);
+                        setPreviewSwf(pet.swf);
+                      }}
+                    >
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.rowTitle}>
+                          {pet.name} {pet.premium ? '👑' : ''}
+                        </Text>
+                        <Text style={styles.rowSub}>
+                          {pet.price_gold > 0 ? `${pet.price_gold.toLocaleString()} Gold` : ''}
+                          {pet.price_gold > 0 && pet.price_tokens > 0 ? ' • ' : ''}
+                          {pet.price_tokens > 0 ? `${pet.price_tokens.toLocaleString()} Tokens` : ''}
+                          {pet.price_gold === 0 && pet.price_tokens === 0 ? 'Event / Special' : ''}
+                        </Text>
+                      </View>
+                      <Pressable
+                        style={[styles.actBtn, { backgroundColor: '#16A34A' }]}
+                        disabled={busyId !== null}
+                        onPress={() => handleBuy(pet)}
+                      >
+                        <Text style={styles.actBtnText}>
+                          {busyId === `buy-${pet.pet_id}` ? '...' : 'Buy'}
+                        </Text>
+                      </Pressable>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              )}
             </View>
 
-            {loading ? (
-              <ActivityIndicator color={NS_THEME.btnOrange} style={{ marginTop: 24 }} />
-            ) : (
-              <ScrollView contentContainerStyle={styles.scrollList}>
-                {filteredShop.map((pet) => (
-                  <Pressable
-                    key={pet.pet_id}
-                    style={[styles.rowCard, previewSwf === pet.swf && styles.rowSelected]}
-                    onPress={() => setPreviewSwf(pet.swf)}
-                  >
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.rowTitle}>
-                        {pet.name} {pet.premium ? '👑' : ''}
-                      </Text>
-                      <Text style={styles.rowSub}>
-                        {pet.price_gold > 0 ? `${pet.price_gold.toLocaleString()} Gold` : ''}
-                        {pet.price_gold > 0 && pet.price_tokens > 0 ? ' • ' : ''}
-                        {pet.price_tokens > 0 ? `${pet.price_tokens.toLocaleString()} Tokens` : ''}
-                        {pet.price_gold === 0 && pet.price_tokens === 0 ? 'Event / Special' : ''}
-                      </Text>
+            <View style={styles.skillsCol}>
+              <Text style={styles.sectionHeader}>
+                Pet Skills {selectedMeta ? `— ${selectedMeta.name}` : ''}
+              </Text>
+              {!selectedMeta ? (
+                <Text style={styles.emptyText}>Select a pet to preview its skills.</Text>
+              ) : (
+                <ScrollView showsVerticalScrollIndicator={false} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollList}>
+                  {(selectedMeta.attacks ?? []).slice(0, 6).map((atk, idx) => (
+                    <View key={idx} style={styles.skillCard}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.rowTitle}>
+                          {atk.name} <Text style={styles.skillLvTag}>(Lv.{Math.max(1, atk.level ?? 1)})</Text>
+                        </Text>
+                        <Text style={styles.rowSub} numberOfLines={3}>
+                          {atk.description} • CD {atk.cooldown}
+                        </Text>
+                      </View>
                     </View>
-                    <Pressable
-                      style={[styles.actBtn, { backgroundColor: '#16A34A' }]}
-                      disabled={busyId !== null}
-                      onPress={() => handleBuy(pet)}
-                    >
-                      <Text style={styles.actBtnText}>
-                        {busyId === `buy-${pet.pet_id}` ? '...' : 'Buy'}
-                      </Text>
-                    </Pressable>
-                  </Pressable>
-                ))}
-              </ScrollView>
-            )}
+                  ))}
+                </ScrollView>
+              )}
+            </View>
           </View>
         )}
       </View>
+      )}
+
+      {/* Confirm Release / Delete Pet Modal */}
+      <Modal
+        visible={confirmDeletePet !== null}
+        transparent
+        statusBarTranslucent
+        navigationBarTranslucent
+        presentationStyle="overFullScreen"
+        animationType="fade"
+        onRequestClose={() => setConfirmDeletePet(null)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setConfirmDeletePet(null)}>
+          <Pressable style={styles.confirmCard} onPress={() => {}}>
+            <Text style={styles.confirmTitle}>🗑️ Release Pet?</Text>
+            <Text style={styles.confirmDesc}>
+              Are you sure you want to permanently release{' '}
+              <Text style={{ fontWeight: '900' }}>{confirmDeletePet?.pet_name}</Text> (Lv.
+              {confirmDeletePet?.pet_level})? This action cannot be undone.
+            </Text>
+            <View style={styles.confirmActions}>
+              <Pressable
+                style={[styles.confirmBtn, { backgroundColor: '#64748B' }]}
+                onPress={() => setConfirmDeletePet(null)}
+              >
+                <Text style={styles.confirmBtnTxt}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.confirmBtn, { backgroundColor: NS_THEME.btnRed }]}
+                disabled={busyId !== null}
+                onPress={() => confirmDeletePet && handleReleasePet(confirmDeletePet)}
+              >
+                <Text style={styles.confirmBtnTxt}>
+                  {busyId?.startsWith('del-') ? 'Releasing...' : 'Release Pet'}
+                </Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </NinjaScrollWindow>
   );
 }
@@ -475,12 +595,12 @@ const styles = StyleSheet.create({
   bannerText: { color: '#78350F', fontSize: 11, fontWeight: '800' },
   body: { flex: 1, flexDirection: 'row', gap: 10 },
   previewCard: {
-    width: 215, backgroundColor: NS_THEME.parchmentCard, borderRadius: 10,
+    width: 245, backgroundColor: NS_THEME.parchmentCard, borderRadius: 10,
     borderWidth: 1.5, borderColor: NS_THEME.woodBorder, padding: 8,
   },
   previewTitle: { color: NS_THEME.inkDark, fontSize: 12.5, fontWeight: '900', marginBottom: 4 },
   stageBox: {
-    height: 135, backgroundColor: NS_THEME.stageDark, borderRadius: 8,
+    height: 175, backgroundColor: NS_THEME.stageDark, borderRadius: 8,
     borderWidth: 1.5, borderColor: NS_THEME.woodBorder, overflow: 'hidden',
   },
   metaBox: { flex: 1, marginTop: 6 },
@@ -541,4 +661,87 @@ const styles = StyleSheet.create({
   },
   learnedBadgeTxt: { color: '#15803D', fontSize: 10, fontWeight: '900' },
   actBtnText: { color: '#FFF', fontSize: 10, fontWeight: '900' },
+  petRowBtns: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  delBtn: {
+    backgroundColor: NS_THEME.btnRed,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.woodBorderDark,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 16,
+  },
+  confirmCard: {
+    width: 340,
+    maxWidth: '92%',
+    backgroundColor: NS_THEME.parchmentCard,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: NS_THEME.woodBorderDark,
+    padding: 14,
+    gap: 10,
+  },
+  confirmTitle: { color: NS_THEME.inkDark, fontSize: 15, fontWeight: '900' },
+  confirmDesc: { color: NS_THEME.inkMid, fontSize: 12, lineHeight: 17 },
+  confirmActions: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  confirmBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 8,
+    alignItems: 'center',
+    borderWidth: 1.25,
+    borderColor: NS_THEME.woodBorderDark,
+  },
+  confirmBtnTxt: { color: '#FFFFFF', fontSize: 12, fontWeight: '900' },
+  emptyCenter: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyPetCard: {
+    backgroundColor: NS_THEME.parchmentCard,
+    borderWidth: 2,
+    borderColor: NS_THEME.woodBorder,
+    borderRadius: 12,
+    padding: 20,
+    alignItems: 'center',
+    gap: 6,
+    maxWidth: 380,
+  },
+  emptyPetIcon: { fontSize: 38 },
+  emptyPetTitle: { color: NS_THEME.inkDark, fontWeight: '900', fontSize: 16 },
+  emptyPetSub: { color: NS_THEME.inkSoft, fontWeight: '700', fontSize: 12.5, textAlign: 'center' },
+  buildingTabs: {
+    flexDirection: 'row',
+    backgroundColor: '#3E2008',
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: NS_THEME.goldTrim,
+    padding: 2,
+    gap: 3,
+  },
+  buildingTabBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 7,
+  },
+  buildingTabActive: {
+    backgroundColor: '#D95B16',
+  },
+  buildingTabTxt: {
+    color: '#F6E4BA',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  buildingTabTxtActive: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '900',
+  },
 });
