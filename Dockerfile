@@ -34,15 +34,15 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /var/www/html
 
-# Install Composer dependencies first for better layer caching
+# Install Composer dependencies first for better layer caching (--no-autoloader because classmap scans app/ThirdParty/SabreAMF)
 COPY Database/Laragon/ninjasage/composer.json Database/Laragon/ninjasage/composer.lock ./
-RUN composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --no-scripts
+RUN composer install --no-dev --no-interaction --prefer-dist --no-scripts --no-autoloader
 
 # Copy Laravel application and authentic Ninja Saga SWF assets
 COPY Database/Laragon/ninjasage/ /var/www/html/
 COPY ["Custom Client/NS Custom Client V1/", "/var/www/swf-assets/"]
 
-RUN composer dump-autoload --optimize \
+RUN composer dump-autoload --no-dev --optimize \
     && mkdir -p storage/framework/sessions storage/framework/views storage/framework/cache \
                 storage/app/swf_cache storage/app/swf_base storage/logs bootstrap/cache logs \
     && chown -R www-data:www-data storage bootstrap/cache logs
