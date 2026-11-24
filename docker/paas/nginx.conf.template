@@ -1,0 +1,65 @@
+server {
+    listen __PORT__;
+    server_name _;
+
+    root /var/www/html/public;
+    index index.php index.html;
+
+    client_max_body_size 64M;
+
+    # Game data JSON & bin files with CORS for mobile clients
+    location ^~ /game_data/ {
+        add_header Access-Control-Allow-Origin "*" always;
+        add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "Origin, Content-Type, Accept, Authorization, X-Session-Key" always;
+        if ($request_method = OPTIONS) {
+            return 204;
+        }
+        try_files $uri =404;
+    }
+
+    # Self-hosted Ruffle WASM with CORS + correct MIME types + immutable cache
+    location ^~ /ruffle/ {
+        types {
+            application/wasm wasm;
+            application/javascript js;
+        }
+        add_header Access-Control-Allow-Origin "*" always;
+        add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Embedder-Policy "require-corp" always;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        if ($request_method = OPTIONS) {
+            return 204;
+        }
+        try_files $uri =404;
+    }
+
+    # Audio assets (BGM, SFX) with CORS
+    location ^~ /audio/ {
+        add_header Access-Control-Allow-Origin "*" always;
+        add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
+        add_header Cache-Control "public, max-age=86400" always;
+        if ($request_method = OPTIONS) {
+            return 204;
+        }
+        try_files $uri =404;
+    }
+
+    # Main Laravel front controller (handles /api/v1/*, /assets/swf/*, /amf, /admin)
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        include fastcgi_params;
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_read_timeout 120;
+    }
+
+    location ~ /\.(?!well-known).* {
+        deny all;
+    }
+}

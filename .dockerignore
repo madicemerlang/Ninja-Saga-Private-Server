@@ -1,0 +1,22 @@
+.git
+.gitignore
+.env
+.env.*
+mobile-app
+QoL Tools
+*.apk
+README.md
+LICENSE
+
+Database/Laragon/ninjasage/.env
+Database/Laragon/ninjasage/vendor
+Database/Laragon/ninjasage/node_modules
+Database/Laragon/ninjasage/storage/logs/*
+Database/Laragon/ninjasage/storage/app/swf_cache/*
+Database/Laragon/ninjasage/storage/app/swf_base/*
+Database/Laragon/ninjasage/storage/framework/cache/*
+Database/Laragon/ninjasage/storage/framework/sessions/*
+Database/Laragon/ninjasage/storage/framework/views/*
+Database/Laragon/ninjasage/logs/*
+Database/Laragon/ninjasage/pvp-server/node_modules
+Database/Laragon/ninjasage/chat-server/node_modules
