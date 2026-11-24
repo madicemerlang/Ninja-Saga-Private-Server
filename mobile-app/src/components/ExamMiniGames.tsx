@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Animated,
   Modal,
   Pressable,
@@ -12,6 +13,7 @@ import { NS_THEME } from './NinjaScrollWindow';
 
 export type ExamMiniGameType = 'quiz' | 'handseal' | 'chakra' | 'scrollpair';
 export type ExamDifficulty = 'chunin' | 'jounin' | 'specialJounin' | 'ninjaTutor';
+export type MiniGameSaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 export interface ExamMiniGameModalProps {
   visible: boolean;
@@ -19,7 +21,7 @@ export interface ExamMiniGameModalProps {
   difficulty: ExamDifficulty;
   title: string;
   subtitle: string;
-  onSuccess: () => void;
+  onSuccess: () => Promise<boolean> | void;
   onClose: () => void;
 }
 
@@ -207,14 +209,54 @@ function shuffle<T>(arr: T[]): T[] {
   return copy;
 }
 
+function WinActionFooter({
+  saveState,
+  onContinue,
+  onRetrySave,
+}: {
+  saveState: MiniGameSaveState;
+  onContinue: () => void;
+  onRetrySave: () => void;
+}) {
+  if (saveState === 'saving') {
+    return (
+      <View style={styles.savingRow}>
+        <ActivityIndicator color="#15803D" size="small" />
+        <Text style={styles.savingTxt}>Recording stage clear...</Text>
+      </View>
+    );
+  }
+  if (saveState === 'error') {
+    return (
+      <Pressable
+        style={[styles.primaryBtn, { backgroundColor: '#B45309' }]}
+        onPress={onRetrySave}
+      >
+        <Text style={styles.primaryBtnTxt}>Retry Save Stage Clear</Text>
+      </Pressable>
+    );
+  }
+  return (
+    <Pressable style={styles.primaryBtn} onPress={onContinue}>
+      <Text style={styles.primaryBtnTxt}>Complete Stage ✓</Text>
+    </Pressable>
+  );
+}
+
 /* ── 1. WRITTEN EXAM QUIZ MINI-GAME ── */
 function WrittenQuizGame({
   difficulty,
-  onSuccess,
+  onWin,
+  saveState,
+  onContinue,
+  onRetrySave,
   onRetryReset,
 }: {
   difficulty: ExamDifficulty;
-  onSuccess: () => void;
+  onWin: () => void;
+  saveState: MiniGameSaveState;
+  onContinue: () => void;
+  onRetrySave: () => void;
   onRetryReset: number;
 }) {
   const questions = useMemo(() => shuffle(QUIZ_POOLS[difficulty]).slice(0, 5), [difficulty, onRetryReset]);
@@ -254,6 +296,12 @@ function WrittenQuizGame({
   const current = questions[idx];
   const passed = score >= 4;
 
+  useEffect(() => {
+    if (finished && passed) {
+      onWin();
+    }
+  }, [finished, passed, onWin]);
+
   const handleAnswer = (optIdx: number) => {
     if (picked !== null || finished) return;
     setPicked(optIdx);
@@ -283,9 +331,11 @@ function WrittenQuizGame({
           Score: {score} / {questions.length} (Need 4 / 5 to pass)
         </Text>
         {passed ? (
-          <Pressable style={styles.primaryBtn} onPress={onSuccess}>
-            <Text style={styles.primaryBtnTxt}>Complete Stage ✓</Text>
-          </Pressable>
+          <WinActionFooter
+            saveState={saveState}
+            onContinue={onContinue}
+            onRetrySave={onRetrySave}
+          />
         ) : (
           <Pressable
             style={[styles.primaryBtn, { backgroundColor: '#B45309' }]}
@@ -348,10 +398,16 @@ function WrittenQuizGame({
 /* ── 2. HAND-SEAL MEMORY MINI-GAME ── */
 function HandSealMemoryGame({
   difficulty,
-  onSuccess,
+  onWin,
+  saveState,
+  onContinue,
+  onRetrySave,
 }: {
   difficulty: ExamDifficulty;
-  onSuccess: () => void;
+  onWin: () => void;
+  saveState: MiniGameSaveState;
+  onContinue: () => void;
+  onRetrySave: () => void;
 }) {
   const roundLengths = useMemo(
     () =>
@@ -365,10 +421,11 @@ function HandSealMemoryGame({
 
   const [round, setRound] = useState(0);
   const [sequence, setSequence] = useState<number[]>([]);
-  const [phase, setPhase] = useState<'showing' | 'input' | 'failed' | 'passed'>('showing');
+  const [phase, setPhase] = useState<'showing' | 'input' | 'transition' | 'failed' | 'passed'>('showing');
   const [highlightId, setHighlightId] = useState<number | null>(null);
   const [inputIdx, setInputIdx] = useState(0);
   const [statusTxt, setStatusTxt] = useState('Watch the Proctor weave the Hand Seals...');
+  const nextRoundTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const startRound = (r: number) => {
     const len = roundLengths[r] ?? 4;
@@ -381,7 +438,16 @@ function HandSealMemoryGame({
 
   useEffect(() => {
     startRound(0);
+    return () => {
+      if (nextRoundTimerRef.current) clearTimeout(nextRoundTimerRef.current);
+    };
   }, [roundLengths]);
+
+  useEffect(() => {
+    if (phase === 'passed') {
+      onWin();
+    }
+  }, [phase, onWin]);
 
   useEffect(() => {
     if (phase !== 'showing' || sequence.length === 0) return;
@@ -437,9 +503,11 @@ function HandSealMemoryGame({
         setStatusTxt('Perfect Hand-Seal Mastery!');
       } else {
         const nextRound = round + 1;
+        setPhase('transition');
         setRound(nextRound);
         setStatusTxt('Seal combo matched! Next round...');
-        setTimeout(() => startRound(nextRound), 650);
+        if (nextRoundTimerRef.current) clearTimeout(nextRoundTimerRef.current);
+        nextRoundTimerRef.current = setTimeout(() => startRound(nextRound), 650);
       }
     }
   };
@@ -450,9 +518,11 @@ function HandSealMemoryGame({
         <Text style={styles.resultEmoji}>🙌🔥</Text>
         <Text style={styles.resultTitle}>HAND-SEAL TRIAL CLEARED!</Text>
         <Text style={styles.resultDesc}>You mastered all {roundLengths.length} Zodiac Seal sequences.</Text>
-        <Pressable style={styles.primaryBtn} onPress={onSuccess}>
-          <Text style={styles.primaryBtnTxt}>Complete Stage ✓</Text>
-        </Pressable>
+        <WinActionFooter
+          saveState={saveState}
+          onContinue={onContinue}
+          onRetrySave={onRetrySave}
+        />
       </View>
     );
   }
@@ -507,10 +577,16 @@ function HandSealMemoryGame({
 /* ── 3. CHAKRA CONTROL TIMING MINI-GAME ── */
 function ChakraTimingGame({
   difficulty,
-  onSuccess,
+  onWin,
+  saveState,
+  onContinue,
+  onRetrySave,
 }: {
   difficulty: ExamDifficulty;
-  onSuccess: () => void;
+  onWin: () => void;
+  saveState: MiniGameSaveState;
+  onContinue: () => void;
+  onRetrySave: () => void;
 }) {
   const targetHits = 4;
   const maxMisses = 3;
@@ -526,6 +602,12 @@ function ChakraTimingGame({
 
   const passed = hits >= targetHits;
   const failed = misses >= maxMisses;
+
+  useEffect(() => {
+    if (passed) {
+      onWin();
+    }
+  }, [passed, onWin]);
 
   useEffect(() => {
     const id = anim.addListener(({ value }) => {
@@ -572,9 +654,11 @@ function ChakraTimingGame({
           Hits: {hits}/{targetHits} • Misses: {misses}/{maxMisses}
         </Text>
         {passed ? (
-          <Pressable style={styles.primaryBtn} onPress={onSuccess}>
-            <Text style={styles.primaryBtnTxt}>Complete Stage ✓</Text>
-          </Pressable>
+          <WinActionFooter
+            saveState={saveState}
+            onContinue={onContinue}
+            onRetrySave={onRetrySave}
+          />
         ) : (
           <Pressable
             style={[styles.primaryBtn, { backgroundColor: '#B45309' }]}
@@ -626,7 +710,17 @@ function ChakraTimingGame({
 }
 
 /* ── 4. SCROLL / SHADOW CLONE PAIR MATCH MINI-GAME ── */
-function ScrollPairGame({ onSuccess }: { onSuccess: () => void }) {
+function ScrollPairGame({
+  onWin,
+  saveState,
+  onContinue,
+  onRetrySave,
+}: {
+  onWin: () => void;
+  saveState: MiniGameSaveState;
+  onContinue: () => void;
+  onRetrySave: () => void;
+}) {
   const [cards, setCards] = useState(() =>
     shuffle([...SCROLL_SYMBOLS, ...SCROLL_SYMBOLS]).map((s, idx) => ({
       uid: idx,
@@ -640,6 +734,12 @@ function ScrollPairGame({ onSuccess }: { onSuccess: () => void }) {
 
   const allMatched = cards.every((c) => c.matched);
   const failed = !allMatched && timeLeft <= 0;
+
+  useEffect(() => {
+    if (allMatched) {
+      onWin();
+    }
+  }, [allMatched, onWin]);
 
   useEffect(() => {
     if (allMatched || failed) return;
@@ -689,9 +789,11 @@ function ScrollPairGame({ onSuccess }: { onSuccess: () => void }) {
           {allMatched ? `All 6 ninja scroll pairs matched with ${timeLeft}s remaining!` : 'Try again faster!'}
         </Text>
         {allMatched ? (
-          <Pressable style={styles.primaryBtn} onPress={onSuccess}>
-            <Text style={styles.primaryBtnTxt}>Complete Stage ✓</Text>
-          </Pressable>
+          <WinActionFooter
+            saveState={saveState}
+            onContinue={onContinue}
+            onRetrySave={onRetrySave}
+          />
         ) : (
           <Pressable
             style={[styles.primaryBtn, { backgroundColor: '#B45309' }]}
@@ -758,10 +860,34 @@ export function ExamMiniGameModal({
   onClose,
 }: ExamMiniGameModalProps) {
   const [retryKey, setRetryKey] = useState(0);
+  const [saveState, setSaveState] = useState<MiniGameSaveState>('idle');
+  const reportedRef = useRef(false);
+  const onSuccessRef = useRef(onSuccess);
+  onSuccessRef.current = onSuccess;
 
   useEffect(() => {
-    if (visible) setRetryKey((k) => k + 1);
+    if (visible) {
+      setRetryKey((k) => k + 1);
+      setSaveState('idle');
+      reportedRef.current = false;
+    }
   }, [visible]);
+
+  const triggerSaveClear = useCallback(async () => {
+    setSaveState('saving');
+    try {
+      const result = await onSuccessRef.current();
+      setSaveState(result === false ? 'error' : 'saved');
+    } catch {
+      setSaveState('error');
+    }
+  }, []);
+
+  const handleWin = useCallback(() => {
+    if (reportedRef.current) return;
+    reportedRef.current = true;
+    void triggerSaveClear();
+  }, [triggerSaveClear]);
 
   return (
     <Modal
@@ -792,17 +918,39 @@ export function ExamMiniGameModal({
             {gameType === 'quiz' && (
               <WrittenQuizGame
                 difficulty={difficulty}
-                onSuccess={onSuccess}
+                onWin={handleWin}
+                saveState={saveState}
+                onContinue={onClose}
+                onRetrySave={triggerSaveClear}
                 onRetryReset={retryKey}
               />
             )}
             {gameType === 'handseal' && (
-              <HandSealMemoryGame difficulty={difficulty} onSuccess={onSuccess} />
+              <HandSealMemoryGame
+                difficulty={difficulty}
+                onWin={handleWin}
+                saveState={saveState}
+                onContinue={onClose}
+                onRetrySave={triggerSaveClear}
+              />
             )}
             {gameType === 'chakra' && (
-              <ChakraTimingGame difficulty={difficulty} onSuccess={onSuccess} />
+              <ChakraTimingGame
+                difficulty={difficulty}
+                onWin={handleWin}
+                saveState={saveState}
+                onContinue={onClose}
+                onRetrySave={triggerSaveClear}
+              />
             )}
-            {gameType === 'scrollpair' && <ScrollPairGame onSuccess={onSuccess} />}
+            {gameType === 'scrollpair' && (
+              <ScrollPairGame
+                onWin={handleWin}
+                saveState={saveState}
+                onContinue={onClose}
+                onRetrySave={triggerSaveClear}
+              />
+            )}
           </ScrollView>
         </View>
       </View>
@@ -1020,4 +1168,11 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   primaryBtnTxt: { color: '#FFFFFF', fontWeight: '900', fontSize: 13 },
+  savingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 6,
+  },
+  savingTxt: { color: '#15803D', fontWeight: '800', fontSize: 12.5 },
 });

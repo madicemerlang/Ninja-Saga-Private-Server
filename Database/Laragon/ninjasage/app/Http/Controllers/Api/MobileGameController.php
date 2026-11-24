@@ -489,7 +489,9 @@ class MobileGameController extends Controller
             'type' => $t->type ?? 'Secret',
         ])->values();
 
-        $petsById = Pet::all()->keyBy('pet_id');
+        $allPets = Pet::all();
+        $petsById = $allPets->keyBy('pet_id');
+        $petsBySwf = $allPets->keyBy('swf');
         $petsCatalog = collect();
         $gameDataPath = public_path('game_data/gamedata.json');
         if (File::exists($gameDataPath)) {
@@ -511,7 +513,7 @@ class MobileGameController extends Controller
                                 if (strtolower($m[1]) === 'token') $priceTokens = $val;
                                 else $priceGold = $val;
                             }
-                            $pModel = $petsById->get($pid);
+                            $pModel = $petsById->get($pid) ?? $petsBySwf->get($pid);
                             $petsCatalog->push([
                                 'pet_id' => $pid,
                                 'name' => $pModel?->name ?? ucfirst(str_replace('pet_', '', $pid)),

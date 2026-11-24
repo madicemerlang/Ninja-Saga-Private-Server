@@ -219,7 +219,12 @@ function parseProfile(charId: number, raw: Record<string, unknown>): ActiveChara
     senjutsuType: (raw.senjutsu_type ?? cd.senjutsu_type ?? null) ? String(raw.senjutsu_type ?? cd.senjutsu_type) : null,
     ss: Number(raw.character_ss ?? cd.character_ss ?? cd.ss ?? 0),
     senjutsuSkills: String(raw.senjutsu_skills ?? cd.senjutsu_skills ?? ''),
-    equippedPet: cd.equipment_pet ? Number(cd.equipment_pet) : null,
+    equippedPet: (() => {
+      const petObj = (raw.pet_data ?? {}) as Record<string, unknown>;
+      const val = sets.pet ?? cd.equipment_pet ?? petObj.pet_id ?? petObj.pet ?? null;
+      const num = val ? Number(val) : 0;
+      return num > 0 ? num : null;
+    })(),
     weapon,
     clothing,
     back,

@@ -39,7 +39,9 @@ class PurchaseService
 
                 // Allow duplicates: Removed check for existing pet
 
-                $petConfig = \App\Models\Pet::where('pet_id', $petId)->first();
+                $petConfig = \App\Models\Pet::where('pet_id', $petId)
+                    ->orWhere('swf', $petId)
+                    ->first();
 
                 if (!$petConfig) return ['status' => 0, 'error' => 'Pet data not found!'];
 
@@ -59,7 +61,8 @@ class PurchaseService
                         foreach ($gd as $sec) {
                             if (($sec['id'] ?? '') === 'pet_shop' && is_array($sec['data']['pets'] ?? null)) {
                                 foreach ($sec['data']['pets'] as $sp) {
-                                    if (($sp['id'] ?? '') === $petId && preg_match('/^(gold|token)_(\d+)(M|K)?$/i', (string) ($sp['price'] ?? ''), $m)) {
+                                    $spId = (string) ($sp['id'] ?? '');
+                                    if (in_array($spId, [(string) $petId, (string) $petConfig->pet_id, (string) $petConfig->swf], true) && preg_match('/^(gold|token)_(\d+)(M|K)?$/i', (string) ($sp['price'] ?? ''), $m)) {
                                         $val = (int) $m[2];
                                         $unit = strtoupper($m[3] ?? '');
                                         if ($unit === 'M') $val *= 1000000;
@@ -91,7 +94,7 @@ class PurchaseService
 
                 CharacterPet::create([
                     'character_id' => $charId,
-                    'pet_id' => $petId,
+                    'pet_id' => $petConfig->pet_id,
                     'name' => $petConfig->name,
                     'level' => 1,
                     'xp' => 0
@@ -140,12 +143,14 @@ class PurchaseService
                     return ['status' => 0, 'error' => 'Permission denied.'];
                 }
 
-                $petConfig = \App\Models\Pet::where('pet_id', $petId)->first();
+                $petConfig = \App\Models\Pet::where('pet_id', $petId)
+                    ->orWhere('swf', $petId)
+                    ->first();
                 if (!$petConfig) return ['status' => 0, 'error' => 'Pet data not found!'];
 
                 CharacterPet::create([
                     'character_id' => $charId,
-                    'pet_id' => $petId,
+                    'pet_id' => $petConfig->pet_id,
                     'name' => $petConfig->name,
                     'level' => 1,
                     'xp' => 0

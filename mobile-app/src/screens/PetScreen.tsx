@@ -375,12 +375,12 @@ export function PetScreen({ mode }: PetScreenProps) {
                         <View style={styles.petRowBtns}>
                           {isEquipped ? (
                             <Pressable
-                              style={[styles.actBtn, { backgroundColor: '#475569' }]}
+                              style={[styles.actBtn, { backgroundColor: '#15803D', borderColor: '#86EFAC' }]}
                               disabled={busyId !== null}
                               onPress={handleUnequip}
                             >
                               <Text style={styles.actBtnText}>
-                                {busyId === 'unequip' ? '...' : 'Unequip'}
+                                {busyId === 'unequip' ? '...' : '✓ Equipped'}
                               </Text>
                             </Pressable>
                           ) : (

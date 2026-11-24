@@ -785,13 +785,17 @@ def cmd_build_entity(input_path: str, output_path: str, anim: str, preview: bool
                     if sc == 1:
                         break
                     if sc == 26 and (sbody[0] & 0x02):
-                        ccid = struct.unpack("<H", sbody[3:5])[0]
+                        _, _, ccid, cnm = parse_place2_info(sbody)
+                        if cnm and "hitarea" in cnm.lower():
+                            continue
                         mat = _parse_mat(sbody, 5) if (sbody[0] & 0x04) else (1.0, 1.0, 0.0, 0.0, 0.0, 0.0)
-                        r = _first_bounds(ccid, vis.copy())
+                        r = _first_bounds(ccid, vis.copy()) if ccid is not None else None
                     elif sc == 70 and (sbody[0] & 0x02):
-                        ccid = struct.unpack("<H", sbody[4:6])[0]
+                        _, _, _, ccid, cnm, _ = parse_place3_info(sbody)
+                        if cnm and "hitarea" in cnm.lower():
+                            continue
                         mat = _parse_mat(sbody, 6) if (sbody[0] & 0x04) else (1.0, 1.0, 0.0, 0.0, 0.0, 0.0)
-                        r = _first_bounds(ccid, vis.copy())
+                        r = _first_bounds(ccid, vis.copy()) if ccid is not None else None
                     else:
                         continue
                     if r:
@@ -1568,6 +1572,8 @@ def load_mission_bg_defs(bg_swf_path: str, id_offset: int = 45000):
     def_tags = []
     root_cid = None
     last_sprite_cid = None
+    shape_max_x = 0.0
+    shape_max_y = 0.0
     for c, b in bg_tags:
         if c == 26 and (b[0] & 0x02):
             _, _, cid, _ = parse_place2_info(b)
@@ -1580,6 +1586,14 @@ def load_mission_bg_defs(bg_swf_path: str, id_offset: int = 45000):
         old_id = struct.unpack("<H", b[:2])[0]
         new_id = old_id + id_offset
         if c in (2, 22, 32):
+            try:
+                _, sx2, _, sy2, _ = parse_rect_px(b, 2)
+                if sx2 > shape_max_x:
+                    shape_max_x = sx2
+                if sy2 > shape_max_y:
+                    shape_max_y = sy2
+            except Exception:
+                pass
             def_tags.append(encode_tag(c, remap_shape_bitmap_ids(c, b, id_offset)))
         elif c == 39:
             sfc = struct.unpack("<H", b[2:4])[0]
@@ -1600,6 +1614,16 @@ def load_mission_bg_defs(bg_swf_path: str, id_offset: int = 45000):
             last_sprite_cid = new_id
         else:
             def_tags.append(encode_tag(c, struct.pack("<H", new_id) + b[2:]))
+
+    # Normalize mismatched Flash stage headers vs actual Ninja Saga 960x550 background artwork:
+    # e.g. mission_24 & mission_135 have a 1920x1080 stage header around 960x550 artwork (would shrink to half-size!),
+    # while mission_01 & mission_83 have a 550x400 stage header around 960x550 artwork (would over-zoom!).
+    if bg_w >= 1500.0 and 700.0 <= shape_max_x <= 1150.0 and 400.0 <= shape_max_y <= 700.0:
+        bg_w = min(shape_max_x, 960.0)
+        bg_h = min(shape_max_y, 550.0)
+    elif bg_w <= 650.0 and shape_max_x >= 900.0 and shape_max_y >= 500.0:
+        bg_w = 960.0
+        bg_h = 550.0
 
     return def_tags, (root_cid or last_sprite_cid), bg_w, bg_h
 
@@ -1880,8 +1904,8 @@ def cmd_build_battle(
         except Exception:
             pass
 
-    ally_paths = [p.strip() for p in allies_swf_path.split(",") if p.strip() and os.path.isfile(p.strip())][:2]
-    ALLY_POS = [(220.0, 168.0), (220.0, 328.0)]
+    ally_paths = [p.strip() for p in allies_swf_path.split(",") if p.strip() and os.path.isfile(p.strip())][:3]
+    ALLY_POS = [(220.0, 168.0), (220.0, 328.0), (310.0, 326.0)]
     unique_ally_meta = {}
     unique_ally_idx = 0
     for ap in ally_paths:
@@ -2020,13 +2044,14 @@ def cmd_build_battle(
         sb_cid, atk_cid, hit_cid, dead_cid, atk_variants = unique_ally_meta[ap]
         wrapper_cid = 890 + idx
         out_tags.append(encode_tag(39, build_enemy_slot_wrapper(wrapper_cid, sb_cid, atk_cid, hit_cid, dead_cid)))
-        ax, ay = ALLY_POS[idx]
+        is_pet_slot = os.path.basename(ap).lower().startswith("pet_")
+        ax, ay = (310.0, 326.0) if is_pet_slot else ALLY_POS[idx]
         ally_slots.append({
             "idx": idx,
             "name": f"a{idx}",
-            "depth": 7 + idx,        # persistent ally wrapper depths (7, 8)
-            "actor_depth": 14 + idx, # temporary clip depth during ally dash/attack/cast (14, 15)
-            "vfx_depth": 16 + idx,   # temporary clip depth for standalone buff aura over Player (16, 17)
+            "depth": 7 + idx,        # persistent ally/pet wrapper depths (7, 8, 9)
+            "actor_depth": 14 + idx, # temporary clip depth during ally/pet dash/attack/cast (14, 15, 16)
+            "vfx_depth": 18 + idx,   # temporary clip depth for standalone buff aura over Player (18, 19, 20)
             "wrapper_cid": wrapper_cid,
             "tx": ax,
             "ty": ay,

@@ -142,7 +142,7 @@ class SwfAssetController extends Controller
 
         if (!$rawMode && in_array($category, ['enemy', 'npcs', 'pets'], true)) {
             $isPreview = in_array($category, ['pets', 'enemy'], true);
-            $cacheFile = $isPreview ? "{$category}_{$stem}_{$anim}_preview_v3.swf" : "{$category}_{$stem}_{$anim}.swf";
+            $cacheFile = $isPreview ? "{$category}_{$stem}_{$anim}_preview_v4.swf" : "{$category}_{$stem}_{$anim}.swf";
             $cached = $this->compileEntitySwf($path, $cacheFile, $anim, $isPreview);
             if ($cached) {
                 $path = $cached;
@@ -416,15 +416,24 @@ class SwfAssetController extends Controller
             }
         }
 
-        // Resolve optional recruited allies (up to 2 NPC or Friend IDs, comma-separated)
+        // Resolve optional recruited allies (up to 2 NPC/Friend IDs + 1 equipped Pet SWF, comma-separated)
         $rawAllies = (string) $request->query('allies', '');
         $allyParts = array_slice(array_filter(array_map(function ($item) {
             return preg_replace('/[^a-zA-Z0-9_-]/', '', trim($item));
-        }, explode(',', $rawAllies))), 0, 2);
+        }, explode(',', $rawAllies))), 0, 3);
 
         $allyPaths = [];
         $allySkillsSpecs = [];
         foreach ($allyParts as $aid) {
+            if (str_starts_with($aid, 'pet_')) {
+                $pp = $this->basePath() . DIRECTORY_SEPARATOR . 'pets' . DIRECTORY_SEPARATOR . $aid . '.swf';
+                if (is_file($pp)) {
+                    $allyPaths[] = $pp;
+                    $allySkillsSpecs[] = 'none';
+                    continue;
+                }
+            }
+
             if (preg_match('/^(?:friend|char|p)_?(\d+)$/i', $aid, $fm)) {
                 $frCharId = (int) $fm[1];
                 $frChar = Character::find($frCharId);
@@ -497,7 +506,7 @@ class SwfAssetController extends Controller
             }
         }
 
-        $hash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}|{$skillsCsv}|{$bgName}|{$alliesKey}|{$allySkillsCsv}|v37_36fps_friendskills"), 0, 12);
+        $hash = substr(md5("{$gender}|{$hair}|{$clothing}|{$weapon}|{$back}|{$skillsCsv}|{$bgName}|{$alliesKey}|{$allySkillsCsv}|v38_36fps_pets"), 0, 12);
         $cacheDir = storage_path('app/swf_cache');
         if (!is_dir($cacheDir)) {
             @mkdir($cacheDir, 0775, true);

@@ -690,10 +690,9 @@ export function HeadquarterScreen() {
     }
   };
 
-  const handleCompleteMiniGame = async () => {
-    if (!activeMiniGame) return;
+  const handleCompleteMiniGame = async (): Promise<boolean> => {
+    if (!activeMiniGame) return false;
     const { row, exam } = activeMiniGame;
-    setActiveMiniGame(null);
     setBusyStage(row.stageId);
     try {
       const finRes = await api.rpc<{ status?: number; result?: string; error?: string }>(
@@ -703,13 +702,24 @@ export function HeadquarterScreen() {
         { sessionKey, charId: profile.charId }
       );
       if (finRes.data?.status === 1) {
+        // Immediately reflect cleared stage & unlock next stage in UI
+        setStages((prev) =>
+          prev.map((s) => {
+            if (s.stageId === row.stageId) return { ...s, status: 2 };
+            if (s.stageId === row.stageId + 1 && s.status === 0) return { ...s, status: 1 };
+            return s;
+          })
+        );
         setNotice(`✓ Cleared ${row.title}!`);
         await Promise.all([loadExamData(), refreshProfile()]);
+        return true;
       } else {
         setNotice(finRes.data?.result || finRes.data?.error || 'Stage completion failed.');
+        return false;
       }
     } catch (e) {
       setNotice(e instanceof Error ? e.message : 'Failed to record stage clear.');
+      return false;
     } finally {
       setBusyStage(null);
     }

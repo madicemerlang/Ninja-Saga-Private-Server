@@ -77,7 +77,9 @@ class CharacterDataService
                 ->first();
 
             if ($activePet) {
-                $petConfig = Pet::where('pet_id', $activePet->pet_id)->first();
+                $petConfig = Pet::where('pet_id', $activePet->pet_id)
+                    ->orWhere('swf', $activePet->pet_id)
+                    ->first();
 
                 $petData = [
                     'pet' => $activePet->id,
@@ -86,9 +88,11 @@ class CharacterDataService
                     'pet_name' => $activePet->name ?: ($petConfig->name ?? 'Pet'),
                     'pet_xp' => $activePet->xp,
                     'pet_level' => $activePet->level,
-                    'pet_skills' => $petConfig ? $petConfig->calculateSkillsString($activePet->level) : "1,1,1,1,1,1",
-                    'pet_mp' => 0,
-                    'pet_swf' => $petConfig->swf ?? ('pet_' . $activePet->pet_id) // Type ID
+                    'pet_skills' => !empty($activePet->learned_skills)
+                        ? $activePet->learned_skills
+                        : ($petConfig ? $petConfig->calculateSkillsString($activePet->level) : "1,0,0,0,0,0"),
+                    'pet_mp' => (int) ($activePet->maturity_points ?? 0),
+                    'pet_swf' => ($petConfig && !empty($petConfig->swf)) ? $petConfig->swf : ('pet_' . $activePet->pet_id) // Type ID
                 ];
             }
         }

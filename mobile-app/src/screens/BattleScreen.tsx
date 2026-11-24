@@ -442,10 +442,17 @@ export function BattleScreen() {
     () => initialEnemies.map((e) => e.id).join(','),
     [initialEnemies]
   );
-  const alliesCsv = useMemo(
-    () => initialAllies.map((a) => a.id).join(','),
-    [initialAllies]
-  );
+  const equippedPetSwf = useMemo(() => {
+    if (!profile?.equippedPet) return '';
+    const rawPet = (profile.raw?.pet_data ?? {}) as Record<string, unknown>;
+    const swf = String(rawPet.pet_swf ?? rawPet.swf ?? '').trim();
+    return swf && swf.startsWith('pet_') ? swf : '';
+  }, [profile]);
+  const alliesCsv = useMemo(() => {
+    const ids = initialAllies.map((a) => a.id);
+    if (equippedPetSwf) ids.push(equippedPetSwf);
+    return ids.join(',');
+  }, [initialAllies, equippedPetSwf]);
   const missionBg = activeBattle?.mission.bg ?? 'mission_01';
 
   // Load skills, weapon damage, equipped pet metadata, and authentic NPC jutsu definitions ONCE per battle
@@ -732,15 +739,20 @@ export function BattleScreen() {
           if (tIdx === -1) return;
 
           const petOut = executePetTurn(activePet, latestEnemies[tIdx], tIdx, petDefRef.current);
-          setPet(petOut.pet);
           const nextEnemies = latestEnemies.map((e, i) => (i === tIdx ? petOut.enemy : e));
-          setEnemies(nextEnemies);
-          setCombatLog(petOut.log);
-          pushFloats(petOut.floats);
-          if (petOut.didCrit) triggerCritShake();
-
+          const petKillsTarget = petOut.enemy.hp <= 0;
           const allDeadAfterPet = nextEnemies.every((e) => e.hp <= 0);
-          setTimeout(() => {
+
+          const applyPetImpact = () => {
+            if (!mountedRef.current) return;
+            setPet(petOut.pet);
+            setEnemies(nextEnemies);
+            setCombatLog(petOut.log);
+            pushFloats(petOut.floats);
+            if (petOut.didCrit) triggerCritShake();
+          };
+
+          const finishPetTurn = () => {
             if (!mountedRef.current) return;
             if (allDeadAfterPet) {
               armSequenceCallbacks(null, () => concludeBattle(true));
@@ -748,8 +760,18 @@ export function BattleScreen() {
             } else {
               stepTimeline(playerRef.current, nextEnemies, curCd);
             }
-          }, Math.round(520 * delayScale));
-        }, Math.round(480 * delayScale));
+          };
+
+          if (equippedPetSwf) {
+            const petStageIdx = initialAllies.length;
+            const petSeq = `a${petStageIdx}_atk_t${tIdx}${petKillsTarget ? '_kill' : ''}`;
+            armSequenceCallbacks(applyPetImpact, finishPetTurn);
+            stageRef.current?.playSequence(petSeq);
+          } else {
+            applyPetImpact();
+            setTimeout(finishPetTurn, Math.round(520 * delayScale));
+          }
+        }, Math.round(320 * delayScale));
         return;
       }
 

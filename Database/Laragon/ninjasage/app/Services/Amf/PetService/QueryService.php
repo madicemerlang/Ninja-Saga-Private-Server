@@ -41,7 +41,9 @@ class QueryService
 
         $petList = [];
         foreach ($pets as $p) {
-            $config = \App\Models\Pet::where('pet_id', $p->pet_id)->first();
+            $config = \App\Models\Pet::where('pet_id', $p->pet_id)
+                ->orWhere('swf', $p->pet_id)
+                ->first();
             if (!$config && is_numeric($p->pet_id)) {
                 $config = \App\Models\Pet::find((int) $p->pet_id);
             }

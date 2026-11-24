@@ -6,7 +6,7 @@ export const DEFAULT_RUFFLE_SCRIPT_URL =
   process.env.EXPO_PUBLIC_RUFFLE_URL ??
   `${DEFAULT_API_BASE_URL}/ruffle/ruffle.js`;
 
-export const SWF_CACHE_BUSTER = 'v55';
+export const SWF_CACHE_BUSTER = 'v56';
 
 export function buildAudioUrl(baseUrl: string, filename: string): string {
   const cleanBase = normalizeBaseUrl(baseUrl);
